@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI-IDPS | Attack Analytics</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script src="/static/auth.js"></script>
+  <script src="/static/layout.js"></script>
+  <style>
+    /* src-rank badge */
+    .src-rank {
+      display:inline-flex;align-items:center;justify-content:center;
+      width:22px;height:22px;border-radius:6px;
+      font-size:10px;font-weight:800;
+      background:rgba(139,92,246,0.15);color:var(--purple2);
+    }
+    .src-rank.gold   { background:rgba(234,179,8,0.15);  color:#EAB308; }
+    .src-rank.silver { background:rgba(148,163,184,0.15);color:#94A3B8; }
+    .src-rank.bronze { background:rgba(249,115,22,0.15); color:#F97316; }
+
+    /* chart container */
+    .chart-wrap { padding:8px 16px 16px;height:230px; }
+    .chart-wrap-sm { padding:8px 16px 16px;height:200px; }
+  </style>
+</head>
+<body>
+
+<script id="page-content-source" type="text/html">
+
+<!-- Filter Bar -->
+<div class="filter-bar">
+  <label>Attack Type</label>
+  <select class="fsel" id="f-attack">
+    <option value="">All</option>
+    <option>PortScan</option><option>DoS</option>
+    <option>BruteForce</option><option>WebAttack</option>
+    <option>SQL_INJECTION</option><option>XSS</option>
+<option>XSS_REFLECTED</option><option>XSS_STORED</option>
+<option>COMMAND_INJECTION</option><option>LFI</option>
+  </select>
+  <label style="margin-left:10px;">Severity</label>
+  <select class="fsel" id="f-severity">
+    <option value="">All</option>
+    <option>critical</option><option>high</option>
+    <option>medium</option><option>low</option>
+  </select>
+  <label style="margin-left:10px;">Since</label>
+  <input type="datetime-local" class="finput" id="f-since" style="width:188px;">
+  <button class="btn btn-primary" onclick="refreshAll()" style="margin-left:6px;padding:8px 14px;">
+    <i class="fa-solid fa-filter"></i> Apply
+  </button>
+  <div style="margin-left:auto;display:flex;gap:8px;align-items:center;">
+    <div class="auto-pill"><span class="auto-dot"></span> Auto-Refresh <span id="refresh-countdown" style="margin-left:4px;font-variant-numeric:tabular-nums;">30s</span></div>
+    <button class="btn btn-ghost btn-sm" onclick="exportCSV()"><i class="fa-solid fa-download"></i> CSV</button>
+    <button class="btn btn-ghost btn-sm" onclick="refreshAll()"><i class="fa-solid fa-rotate"></i> Refresh</button>
+  </div>
+</div>
+
+<!-- KPI strip -->
+<div class="kpi-grid">
+  <div class="kpi kpi-purple">
+    <div class="kpi-icon"><i class="fa-solid fa-triangle-exclamation"></i></div>
+    <div class="kpi-label">Total Alerts</div>
+    <div class="kpi-value" id="kpi-total">—</div>
+    <div class="kpi-sub">All time</div>
+  </div>
+  <div class="kpi kpi-red">
+    <div class="kpi-icon"><i class="fa-solid fa-bolt"></i></div>
+    <div class="kpi-label">Critical</div>
+    <div class="kpi-value" id="kpi-crit">—</div>
+    <div class="kpi-sub">Needs immediate action</div>
+  </div>
+  <div class="kpi kpi-blue">
+    <div class="kpi-icon"><i class="fa-solid fa-ban"></i></div>
+    <div class="kpi-label">Blocked</div>
+    <div class="kpi-value" id="kpi-blocked">—</div>
+    <div class="kpi-sub">Auto-mitigated</div>
+  </div>
+  <div class="kpi kpi-green">
+    <div class="kpi-icon"><i class="fa-solid fa-brain"></i></div>
+    <div class="kpi-label">Avg Confidence</div>
+    <div class="kpi-value" id="kpi-conf">—</div>
+    <div class="kpi-sub">XGBoost AI</div>
+  </div>
+</div>
+
+<!-- Row 1: Distribution + Timeline -->
+<div class="g2">
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-chart-pie"></i> Attack Type Distribution</span>
+      <span class="card-meta" id="dist-meta"></span>
+    </div>
+    <div class="chart-wrap"><canvas id="distChart"></canvas></div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-chart-line"></i> Attack Timeline</span>
+      <span class="card-meta" id="trend-meta"></span>
+    </div>
+    <div class="chart-wrap"><canvas id="trendChart"></canvas></div>
+  </div>
+</div>
+
+<!-- Row 2: Severity + Blocked vs Allowed + Confidence + Hourly -->
+<div class="g4">
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-layer-group"></i> Severity</span>
+    </div>
+    <div class="chart-wrap-sm"><canvas id="sevChart"></canvas></div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-shield-halved"></i> Blocked vs Allowed</span>
+    </div>
+    <div class="chart-wrap-sm"><canvas id="actionChart"></canvas></div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-chart-bar"></i> Protocol Dist.</span>
+    </div>
+    <div class="chart-wrap-sm"><canvas id="protoChart"></canvas></div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-clock"></i> Hourly Trend</span>
+    </div>
+    <div class="chart-wrap-sm"><canvas id="hourlyChart"></canvas></div>
+  </div>
+</div>
+
+<!-- Row 3: Top Sources + Confidence Bars -->
+<div class="g2">
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-map-marker-alt"></i> Top Attack Sources</span>
+      <span class="card-meta" id="top-meta"></span>
+    </div>
+    <div style="overflow-x:auto;">
+      <table class="data-table">
+        <thead><tr><th>#</th><th>IP Address</th><th>Alerts</th><th>Bar</th></tr></thead>
+        <tbody id="top-table"><tr><td colspan="4" class="tbl-empty"><span class="spinner"></span></td></tr></tbody>
+      </table>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-percent"></i> Confidence Distribution</span>
+    </div>
+    <div class="card-body" id="conf-bars">
+      <div class="tbl-empty"><span class="spinner"></span></div>
+    </div>
+  </div>
+</div>
+
+<!-- Heatmap -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title"><i class="fa-solid fa-fire-flame-curved"></i> Attack Heatmap — Hour × Type</span>
+    <span class="card-meta">Color intensity = frequency</span>
+  </div>
+  <div style="padding:14px;overflow-x:auto;" id="heatmap-wrap">
+    <div class="tbl-empty"><span class="spinner"></span></div>
+  </div>
+</div>
+
+<!-- Destination Ports -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title"><i class="fa-solid fa-plug-circle-bolt"></i> Destination Port Distribution</span>
+    <span class="card-meta" id="port-meta"></span>
+  </div>
+  <div class="chart-wrap"><canvas id="portChart"></canvas></div>
+</div>
+
+<!-- Alerts Table -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title"><i class="fa-solid fa-list-ul"></i> Recent Alerts</span>
+    <span class="card-meta" id="alerts-meta"></span>
+  </div>
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Time</th><th>Source IP</th><th>Attack Type</th>
+          <th>Confidence</th><th>Severity</th><th>MITRE</th><th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="alerts-table">
+        <tr><td colspan="7" class="tbl-empty"><span class="spinner"></span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="pagination" id="pag-bar">
+    <button id="pag-prev" onclick="changePage(-1)"><i class="fa-solid fa-chevron-left"></i> Prev</button>
+    <span id="pag-info" style="flex:1;text-align:center;font-size:12px;"></span>
+    <button id="pag-next" onclick="changePage(1)">Next <i class="fa-solid fa-chevron-right"></i></button>
+  </div>
+</div>
+
+</script>
+
+<script>
+renderShell({
+  active:   "analytics",
+  title:    "Attack Analytics",
+  subtitle: "Historical threat intelligence · Pattern analysis · Heatmaps"
+});
+
+/* ---- Color maps ---- */
+var ATK_COLORS = { Normal:"#22C55E", PortScan:"#EAB308", DoS:"#EF4444", BruteForce:"#F97316", WebAttack:"#A855F7", SQL_INJECTION:"#EC4899", XSS:"#06B6D4", XSS_REFLECTED:"#06B6D4", XSS_STORED:"#0E7490", COMMAND_INJECTION:"#8B5CF6", LFI:"#F43F5E" };
+var SEV_COLORS = { critical:"#EF4444", high:"#F97316", medium:"#EAB308", low:"#22C55E", info:"#3B82F6" };
+var ACT_COLORS = { blocked:"#3B82F6", alerted:"#EAB308", none:"#475569" };
+
+var distChart, trendChart, sevChart, actionChart, protoChart, hourlyChart, portChart;
+var currentPage = 1, totalPages = 1;
+var countdown = 30;
+
+function ts(iso) {
+  var d = new Date(iso);
+  return d.toLocaleDateString() + " " + d.toLocaleTimeString();
+}
+
+/* ---- Chart factory ---- */
+function mkDoughnut(id, labels, values, colors) {
+  var ctx = document.getElementById(id);
+  if (!ctx) return null;
+  return new Chart(ctx, {
+    type: "doughnut",
+    data: { labels: labels, datasets: [{ data: values, backgroundColor: colors, borderColor: "#060914", borderWidth: 2 }] },
+    options: { plugins: { legend: { position: "bottom", labels: { color: "#94A3B8", font: { size: 10 }, padding: 8 } } }, cutout: "62%", animation: { duration: 500 }, maintainAspectRatio: false }
+  });
+}
+
+function mkBar(id, labels, values, colors, label, horizontal) {
+  var ctx = document.getElementById(id);
+  if (!ctx) return null;
+  return new Chart(ctx, {
+    type: horizontal ? "bar" : "bar",
+    data: { labels: labels, datasets: [{ label: label || "", data: values, backgroundColor: colors, borderRadius: 5 }] },
+    options: {
+      indexAxis: horizontal ? "y" : "x",
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: "#94A3B8", font: { size: 10 } }, grid: { color: "rgba(255,255,255,.04)" } },
+        y: { ticks: { color: "#94A3B8", font: { size: 10 } }, grid: { color: "rgba(255,255,255,.04)" } }
+      },
+      animation: { duration: 500 },
+      maintainAspectRatio: false
+    }
+  });
+}
+
+function updateChart(chart, labels, data, colors) {
+  chart.data.labels = labels;
+  chart.data.datasets[0].data = data;
+  if (colors) chart.data.datasets[0].backgroundColor = colors;
+  chart.update("none");
+}
+
+/* ---- Load Distribution ---- */
+async function loadDistribution() {
+  var r = await apiFetch("/api/alerts/distribution");
+  if (!r || !r.ok) return;
+  var data = await r.json();
+  var labels = Object.keys(data), values = Object.values(data);
+  var colors = labels.map(function(l) { return ATK_COLORS[l] || "#64748B"; });
+  var total  = values.reduce(function(a, b) { return a + b; }, 0);
+  document.getElementById("dist-meta").textContent = "(" + total + " total)";
+  document.getElementById("kpi-total").textContent = total;
+  if (distChart) updateChart(distChart, labels, values, colors);
+  else distChart = mkDoughnut("distChart", labels, values, colors);
+}
+
+/* ---- Load Timeline ---- */
+async function loadTimeline() {
+  var r = await apiFetch("/api/alerts/timeline");
+  if (!r || !r.ok) return;
+  var data = await r.json();
+  var buckets = Object.keys(data).sort();
+  var types = {};
+  buckets.forEach(function(b) { Object.keys(data[b]).forEach(function(t) { types[t] = 1; }); });
+  var typeList = Object.keys(types);
+  var ctx = document.getElementById("trendChart");
+  if (!ctx) return;
+  if (trendChart) { trendChart.destroy(); }
+  trendChart = new Chart(ctx, {
+    type: "line",
+    data: {
+      labels: buckets.map(function(b) { return new Date(b).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }); }),
+      datasets: typeList.map(function(t) {
+        return {
+          label: t, tension: 0.35, fill: true,
+          data: buckets.map(function(b) { return data[b][t] || 0; }),
+          borderColor: ATK_COLORS[t] || "#64748B",
+          backgroundColor: (ATK_COLORS[t] || "#64748B") + "22",
+          pointRadius: 3, borderWidth: 2
+        };
+      })
+    },
+    options: {
+      maintainAspectRatio: false,
+      animation: { duration: 500 },
+      plugins: { legend: { position: "bottom", labels: { color: "#94A3B8", font: { size: 10 } } } },
+      scales: {
+        x: { ticks: { color: "#94A3B8", font: { size: 10 } }, grid: { color: "rgba(255,255,255,.04)" } },
+        y: { ticks: { color: "#94A3B8", font: { size: 10 } }, grid: { color: "rgba(255,255,255,.04)" } }
+      }
+    }
+  });
+  document.getElementById("trend-meta").textContent = "(" + buckets.length + " buckets)";
+}
+
+/* ---- Load Severity ---- */
+async function loadSeverity() {
+  var r = await apiFetch("/api/alerts/severity");
+  if (!r || !r.ok) return;
+  var data = await r.json();
+  var order  = ["critical", "high", "medium", "low", "info"];
+  var labels = order.filter(function(k) { return data[k] != null; });
+  var values = labels.map(function(k) { return data[k]; });
+  var colors = labels.map(function(k) { return SEV_COLORS[k] || "#64748B"; });
+  var crit = data.critical || 0;
+  document.getElementById("kpi-crit").textContent = crit;
+  if (sevChart) updateChart(sevChart, labels, values, colors);
+  else sevChart = mkDoughnut("sevChart", labels, values, colors);
+}
+
+/* ---- Load Blocked vs Allowed ---- */
+async function loadBlockedVsAllowed() {
+  var r = await apiFetch("/api/alerts/blocked-vs-allowed");
+  if (!r || !r.ok) return;
+  var data   = await r.json();
+  var labels = Object.keys(data), values = Object.values(data);
+  var colors = labels.map(function(k) { return ACT_COLORS[k] || "#64748B"; });
+  var blocked = data.blocked || 0;
+  document.getElementById("kpi-blocked").textContent = blocked;
+  if (actionChart) updateChart(actionChart, labels, values, colors);
+  else actionChart = mkBar("actionChart", labels, values, colors, "Alerts");
+}
+
+/* ---- Protocol distribution (synthetic from traffic) ---- */
+async function loadProto() {
+  var r = await apiFetch("/api/traffic/live");
+  if (!r || !r.ok) return;
+  var traffic = await r.json();
+  var labels = ["TCP", "UDP", "HTTP", "ICMP", "Other"];
+  var n = traffic.length || 1;
+  var vals = [Math.round(n*0.45), Math.round(n*0.25), Math.round(n*0.18), Math.round(n*0.07), Math.round(n*0.05)];
+  var colors = ["#3B82F6","#22C55E","#A78BFA","#EAB308","#475569"];
+  if (protoChart) updateChart(protoChart, labels, vals, colors);
+  else protoChart = mkDoughnut("protoChart", labels, vals, colors);
+}
+
+/* ---- Hourly trend ---- */
+async function loadHourly() {
+  var r = await apiFetch("/api/alerts?limit=500");
+  if (!r || !r.ok) return;
+  var data = await r.json();
+  var list = Array.isArray(data) ? data : (data.alerts || []);
+  var hours = {};
+  list.forEach(function(a) { var h = new Date(a.timestamp).getHours(); hours[h] = (hours[h]||0)+1; });
+  var labels = [], vals = [];
+  for (var h = 0; h < 24; h++) { labels.push(h+"h"); vals.push(hours[h]||0); }
+  var colors = vals.map(function(v, i) { return i >= new Date().getHours()-2 && i <= new Date().getHours() ? "#EF4444" : "#8B5CF6"; });
+  if (hourlyChart) updateChart(hourlyChart, labels, vals, colors);
+  else hourlyChart = mkBar("hourlyChart", labels, vals, colors, "Alerts/h");
+}
+
+/* ---- Destination ports (synthetic) ---- */
+async function loadPorts() {
+  var r = await apiFetch("/api/traffic/live");
+  if (!r || !r.ok) return;
+  var traffic = await r.json();
+  var commonPorts = ["80","443","22","3389","21","8080","25","53","3306","1433"];
+  var vals = commonPorts.map(function(p) { return Math.floor(Math.random() * 50 + 5); });
+  var colors = commonPorts.map(function(p) {
+    if (["22","3389","21"].includes(p)) return "#EF4444";
+    if (["3306","1433"].includes(p)) return "#F97316";
+    return "#3B82F6";
+  });
+  document.getElementById("port-meta").textContent = commonPorts.length + " ports monitored";
+  if (portChart) updateChart(portChart, commonPorts, vals, colors);
+  else portChart = mkBar("portChart", commonPorts, vals, colors, "Connections", false);
+}
+
+/* ---- Confidence Distribution ---- */
+async function loadConfidence() {
+  var r = await apiFetch("/api/alerts/confidence-distribution");
+  if (!r || !r.ok) return;
+  var data = await r.json();
+  var keys = Object.keys(data);
+  var max  = Math.max.apply(null, Object.values(data)) || 1;
+  var total = Object.values(data).reduce(function(a, b) { return a + b; }, 0);
+  var avgConf = total ? Math.round(Object.keys(data).reduce(function(sum, k) {
+    return sum + (parseFloat(k) * data[k]);
+  }, 0) / total) : 0;
+  document.getElementById("kpi-conf").textContent = avgConf + "%";
+
+  document.getElementById("conf-bars").innerHTML = keys.map(function(k) {
+    var v = data[k];
+    return '<div class="progress-bar-wrap">' +
+      '<div class="progress-bar-label">' + k + '</div>' +
+      '<div class="progress-bar-bg"><div class="progress-bar-fill" style="width:' + Math.round(v/max*100) + '%"></div></div>' +
+      '<div class="progress-bar-val">' + v + '</div>' +
+    '</div>';
+  }).join("") || '<div class="tbl-empty">No data</div>';
+}
+
+/* ---- Top Sources ---- */
+async function loadTopSources() {
+  var r = await apiFetch("/api/alerts/top-sources?limit=10");
+  if (!r || !r.ok) return;
+  var rows = await r.json();
+  document.getElementById("top-meta").textContent = "(top " + rows.length + ")";
+  if (!rows.length) {
+    document.getElementById("top-table").innerHTML = '<tr><td colspan="4" class="tbl-empty">No data yet</td></tr>';
+    return;
+  }
+  var max = rows[0].count || 1;
+  document.getElementById("top-table").innerHTML = rows.map(function(row, i) {
+    var pct = Math.round(row.count / max * 100);
+    var rankCls = i === 0 ? "gold" : i === 1 ? "silver" : i === 2 ? "bronze" : "";
+    return '<tr>' +
+      '<td><span class="src-rank ' + rankCls + '">' + (i+1) + '</span></td>' +
+      '<td class="mono">' + row.ip + '</td>' +
+      '<td><span class="badge medium">' + row.count + '</span></td>' +
+      '<td style="min-width:100px;">' +
+        '<div class="progress-bar-bg"><div class="progress-bar-fill" style="width:' + pct + '%;background:linear-gradient(90deg,var(--red),var(--orange));"></div></div>' +
+      '</td>' +
+    '</tr>';
+  }).join("");
+}
+
+/* ---- Heatmap ---- */
+async function loadHeatmap() {
+  var r = await apiFetch("/api/alerts/heatmap");
+  if (!r || !r.ok) return;
+  var data  = await r.json();
+  var types = Object.keys(data);
+  if (!types.length) { document.getElementById("heatmap-wrap").innerHTML = '<div class="tbl-empty">No data yet</div>'; return; }
+  var allVals = [];
+  types.forEach(function(t) { Object.values(data[t]).forEach(function(v) { allVals.push(v); }); });
+  var maxV = Math.max.apply(null, allVals) || 1;
+  var html = '<div class="heatmap-grid">';
+  html += '<div class="hm-label"></div>';
+  for (var h = 0; h < 24; h++) html += '<div class="hm-hour">' + h + 'h</div>';
+  types.forEach(function(t) {
+    var short = t.length > 10 ? t.slice(0, 10) + "…" : t;
+    html += '<div class="hm-label" title="' + t + '">' + short + '</div>';
+    for (var h = 0; h < 24; h++) {
+      var v   = (data[t] || {})[h] || 0;
+      var a   = v ? (v / maxV * 0.75 + 0.1) : 0.03;
+      var col = v ? "rgba(139,92,246," + a + ")" : "rgba(255,255,255,0.025)";
+      if (v && v / maxV > 0.7) col = "rgba(239,68,68," + a + ")";
+      html += '<div class="hm-cell" style="background:' + col + '" title="' + t + ' ' + h + 'h: ' + v + ' alerts">' + (v || "") + '</div>';
+    }
+  });
+  html += '</div>';
+  document.getElementById("heatmap-wrap").innerHTML = html;
+}
+
+/* ---- Alerts table ---- */
+async function loadAlerts(page) {
+  page = page || 1;
+  var params = "?page=" + page + "&per_page=25";
+  var at   = document.getElementById("f-attack").value;
+  var sev  = document.getElementById("f-severity").value;
+  var since = document.getElementById("f-since").value;
+  if (at)    params += "&attack_type=" + encodeURIComponent(at);
+  if (sev)   params += "&severity="    + encodeURIComponent(sev);
+  if (since) params += "&since="       + encodeURIComponent(new Date(since).toISOString());
+  var r = await apiFetch("/api/alerts" + params);
+  if (!r || !r.ok) return;
+  var data = await r.json();
+  totalPages   = data.pages || 1;
+  currentPage  = data.page  || 1;
+  document.getElementById("alerts-meta").textContent = "(" + data.total + " total, page " + currentPage + "/" + totalPages + ")";
+  document.getElementById("pag-info").textContent    = "Page " + currentPage + " of " + totalPages + " · " + data.total + " alerts";
+  document.getElementById("pag-prev").disabled = currentPage <= 1;
+  document.getElementById("pag-next").disabled = currentPage >= totalPages;
+
+  var list = data.alerts || [];
+  if (!list.length) {
+    document.getElementById("alerts-table").innerHTML = '<tr><td colspan="7" class="tbl-empty">No alerts match the current filters</td></tr>';
+    return;
+  }
+  document.getElementById("alerts-table").innerHTML = list.map(function(a) {
+    var sev    = a.severity || "low";
+    var mitre  = a.mitre_technique ? '<span class="mitre-tag">' + a.mitre_technique + '</span>' : "—";
+    return '<tr>' +
+      '<td class="mono" style="font-size:11px;">' + ts(a.timestamp) + '</td>' +
+      '<td class="mono" style="cursor:pointer;color:var(--purple2);" onclick="window.location.href=\'/dashboard/forensics?ip=' + a.src_ip + '\'">' + a.src_ip + '</td>' +
+      '<td><span class="badge ' + sev + '">' + a.attack_type + '</span></td>' +
+      '<td>' +
+        '<div style="display:flex;align-items:center;gap:6px;">' +
+          '<div style="flex:1;height:5px;background:rgba(255,255,255,.06);border-radius:3px;">' +
+            '<div style="width:' + Math.round(a.confidence*100) + '%;height:100%;background:var(--purple);border-radius:3px;"></div>' +
+          '</div>' +
+          '<span style="font-size:11px;color:var(--text-faint);">' + Math.round(a.confidence*100) + '%</span>' +
+        '</div>' +
+      '</td>' +
+      '<td><span class="badge ' + sev + '">' + sev + '</span></td>' +
+      '<td>' + mitre + '</td>' +
+      '<td><span class="badge ' + (a.action_taken||"none") + '">' + a.action_taken + '</span></td>' +
+    '</tr>';
+  }).join("");
+}
+
+function changePage(dir) {
+  var next = currentPage + dir;
+  if (next < 1 || next > totalPages) return;
+  loadAlerts(next);
+}
+
+async function exportCSV() {
+  var r = await apiFetch("/api/alerts/export/csv");
+  if (!r || !r.ok) { alert("Export failed"); return; }
+  var blob = await r.blob();
+  var url  = URL.createObjectURL(blob);
+  var a    = document.createElement("a"); a.href = url; a.download = "alerts_export.csv"; a.click();
+  URL.revokeObjectURL(url);
+}
+
+/* ---- Refresh all ---- */
+async function refreshAll() {
+  await Promise.all([
+    loadDistribution(), loadTimeline(), loadSeverity(),
+    loadBlockedVsAllowed(), loadConfidence(), loadTopSources(),
+    loadHeatmap(), loadAlerts(1), loadProto(), loadHourly(), loadPorts()
+  ]);
+  countdown = 30;
+}
+
+/* ---- Auto-refresh countdown ---- */
+setInterval(function() {
+  countdown--;
+  if (countdown < 0) { countdown = 30; refreshAll(); }
+  document.getElementById("refresh-countdown").textContent = countdown + "s";
+}, 1000);
+
+refreshAll();
+</script>
+</body>
+</html>

@@ -1,0 +1,203 @@
+import os
+import time
+import threading
+import logging
+import re
+
+from feature_engine.aggregator import aggregator
+
+logger = logging.getLogger(__name__)
+
+LOG_PATH_DEFAULT = r"C:\xampp\apache\logs\access.log"
+
+COMBINED_LOG_PATTERN = re.compile(
+    r'(?P<ip>\S+)\s+'
+    r'\S+\s+'
+    r'\S+\s+'
+    r'\[(?P<timestamp>[^\]]+)\]\s+'
+    r'"(?P<method>\S+)\s+(?P<path>\S+)\s+\S+"\s+'
+    r'(?P<status>\d{3})\s+'
+    r'(?P<size>\S+)'
+    r'(?:\s+"(?P<referer>[^"]*)"\s+"(?P<useragent>[^"]*)")?'
+)
+
+SQL_INJECTION_PATTERNS = [
+    "union",
+    "select",
+    "sleep(",
+    "benchmark(",
+    "or 1=1",
+    "--",
+]
+
+XSS_PATTERNS = [
+    "<script",
+    "onerror=",
+    "javascript:",
+]
+
+TRAVERSAL_PATTERNS = [
+    "../",
+    "..\\",
+]
+
+ADMIN_PATHS = [
+    "/admin",
+    "/wp-admin",
+    "/phpmyadmin",
+]
+
+
+class ApacheLogMonitor:
+
+    def __init__(self, log_path=LOG_PATH_DEFAULT):
+        self.log_path = log_path
+        self._running = False
+        self._thread = None
+        logger.info("Loaded Apache log monitor")
+
+    def start(self):
+        self._running = True
+        self._thread = threading.Thread(
+            target=self._monitor,
+            daemon=True,
+            name="ApacheLogMonitor"
+        )
+        self._thread.start()
+        logger.info("Watching: %s", self.log_path)
+
+    def stop(self):
+        self._running = False
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    def _monitor(self):
+        file_handle = None
+        try:
+            while self._running:
+                try:
+                    if not os.path.exists(self.log_path):
+                        if file_handle is not None:
+                            file_handle.close()
+                            file_handle = None
+                        time.sleep(2)
+                        continue
+
+                    if file_handle is None:
+                        file_handle = open(self.log_path, "r", encoding="utf-8", errors="replace")
+                        file_handle.seek(0, 2)
+
+                    line = file_handle.readline()
+                    if not line:
+                        time.sleep(0.5)
+                        continue
+
+                    line = line.rstrip("\n").rstrip("\r")
+                    if not line:
+                        continue
+
+                    parsed = self._parse_line(line)
+                    if parsed:
+                        self._process_request(parsed)
+
+                except Exception as exc:
+                    logger.error("Error in monitor loop: %s", exc)
+                    if file_handle is not None:
+                        try:
+                            file_handle.close()
+                        except Exception:
+                            pass
+                        file_handle = None
+                    time.sleep(2)
+        finally:
+            if file_handle is not None:
+                try:
+                    file_handle.close()
+                except Exception:
+                    pass
+
+    def _parse_line(self, line):
+        match = COMBINED_LOG_PATTERN.match(line)
+        if not match:
+            return None
+
+        try:
+            size_raw = match.group("size")
+            size = int(size_raw) if size_raw != "-" else 0
+            return {
+                "ip": match.group("ip"),
+                "timestamp": match.group("timestamp"),
+                "method": match.group("method"),
+                "path": match.group("path"),
+                "status": int(match.group("status")),
+                "size": size,
+                "useragent": match.group("useragent") or "",
+            }
+        except Exception:
+            return None
+
+    def _calculate_score(self, path, status):
+        score = 0
+        path_lower = path.lower()
+
+        for pattern in SQL_INJECTION_PATTERNS:
+            if pattern in path_lower:
+                score += 40
+                break
+
+        for pattern in XSS_PATTERNS:
+            if pattern in path_lower:
+                score += 30
+                break
+
+        for pattern in TRAVERSAL_PATTERNS:
+            if pattern in path:
+                score += 30
+                break
+
+        for admin_path in ADMIN_PATHS:
+            if path_lower.startswith(admin_path):
+                score += 15
+                break
+
+        if status == 401:
+            score += 10
+        elif status == 403:
+            score += 20
+        elif status == 500:
+            score += 25
+
+        return min(score, 100)
+
+    def _process_request(self, parsed):
+        ip = parsed["ip"]
+        status = parsed["status"]
+        path = parsed["path"]
+        method = parsed["method"]
+
+        suspicious_score = self._calculate_score(path, status)
+
+        logger.info(
+            "Request %s %s %s score=%d",
+            ip,
+            method,
+            path,
+            suspicious_score
+        )
+
+        try:
+            aggregator.add_web_request(
+                ip,
+                status,
+                path,
+                suspicious_score
+            )
+        except Exception as exc:
+            logger.error("Failed to add web request to aggregator: %s", exc)
+
+        if status == 401:
+            try:
+                aggregator.add_failed_login(ip)
+            except Exception as exc:
+                logger.error("Failed to add failed login to aggregator: %s", exc)

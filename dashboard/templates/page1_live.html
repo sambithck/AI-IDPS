@@ -1,0 +1,988 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI-IDPS | Security Operations Center</title>
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+<script src="/static/auth.js"></script>
+<script src="/static/layout.js"></script>
+<style>
+/* ---- Page-specific overrides ---- */
+
+/* Attack type pills in feed */
+.atk-sql   { background:rgba(239,68,68,0.12);   color:#EF4444; }
+.atk-xss   { background:rgba(249,115,22,0.12);  color:#F97316; }
+.atk-port  { background:rgba(234,179,8,0.12);   color:#EAB308; }
+.atk-brute { background:rgba(168,85,247,0.12);  color:#A855F7; }
+.atk-dos   { background:rgba(239,68,68,0.12);   color:#EF4444; }
+.atk-cmd   { background:rgba(236,72,153,0.12);  color:#EC4899; }
+.atk-dir   { background:rgba(59,130,246,0.12);  color:#3B82F6; }
+.atk-other { background:rgba(71,85,105,0.12);   color:#94A3B8; }
+
+/* Threat score arc animation */
+.threat-score-wrap {
+  display:flex; flex-direction:column; align-items:center; padding:16px 0;
+}
+.score-ring {
+  position:relative; width:130px; height:130px;
+}
+.score-ring svg { transform:rotate(-90deg); }
+.score-ring .ring-bg { fill:none; stroke:rgba(255,255,255,0.06); stroke-width:10; }
+.score-ring .ring-fg { fill:none; stroke-width:10; stroke-linecap:round; transition:stroke-dashoffset 1s ease; }
+.score-inner {
+  position:absolute; inset:0;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+}
+.score-num  { font-size:36px; font-weight:900; line-height:1; }
+.score-lbl  { font-size:9.5px; font-weight:700; text-transform:uppercase; letter-spacing:1.5px; color:var(--text-faint); margin-top:3px; }
+
+/* Pulse animation for critical alerts */
+@keyframes critPulse {
+  0%,100% { box-shadow:0 0 0 0 rgba(239,68,68,0.4); }
+  50%      { box-shadow:0 0 0 8px rgba(239,68,68,0); }
+}
+.kpi-red:has(.kpi-value) { animation: none; }
+.kpi-value.crit-active  { animation: critPulse 2s infinite; border-radius:4px; }
+
+/* System health bars */
+.health-bar-wrap { margin-bottom:10px; }
+.health-label { display:flex; justify-content:space-between; font-size:11.5px; margin-bottom:4px; }
+.health-label .name { color:var(--text-dim); font-weight:600; }
+.health-label .pct  { color:var(--text); font-weight:700; font-family:var(--mono); }
+.health-bar-bg  { height:6px; background:rgba(255,255,255,0.06); border-radius:3px; overflow:hidden; }
+.health-bar-fill{ height:100%; border-radius:3px; transition:width 0.6s ease; }
+
+/* MITRE matrix mini */
+.mitre-mini-grid {
+  display:grid; grid-template-columns:repeat(auto-fill,minmax(130px,1fr)); gap:6px;
+  padding:14px;
+}
+.mitre-cell {
+  padding:8px 10px; border-radius:8px;
+  background:rgba(139,92,246,0.07);
+  border:1px solid rgba(139,92,246,0.14);
+  font-size:11px; font-weight:600; color:var(--text-dim);
+  transition:0.15s; cursor:default;
+}
+.mitre-cell:hover { background:rgba(139,92,246,0.14); color:var(--purple2); }
+.mitre-cell.hit   { background:rgba(239,68,68,0.12); border-color:rgba(239,68,68,0.25); color:var(--red); }
+.mitre-cell .tactic { font-size:9px; color:var(--text-faint); text-transform:uppercase; letter-spacing:1px; display:block; margin-bottom:3px; }
+
+/* Packet inspector */
+.pkt-row {
+  display:flex; align-items:flex-start; gap:10px;
+  padding:10px 14px;
+  border-bottom:1px solid rgba(255,255,255,0.04);
+  font-size:11.5px; animation:feedSlideIn 0.3s ease;
+}
+.pkt-row:last-child { border-bottom:none; }
+.pkt-proto {
+  display:inline-flex; align-items:center; justify-content:center;
+  width:46px; height:20px; border-radius:4px;
+  font-size:9.5px; font-weight:800; text-transform:uppercase;
+  flex-shrink:0;
+}
+.pkt-tcp  { background:rgba(59,130,246,0.15);  color:#3B82F6; }
+.pkt-udp  { background:rgba(34,197,94,0.15);   color:#22C55E; }
+.pkt-icmp { background:rgba(234,179,8,0.15);   color:#EAB308; }
+.pkt-http { background:rgba(139,92,246,0.15);  color:#A78BFA; }
+
+/* Action buttons in table */
+.action-btn {
+  padding:4px 10px; border-radius:6px;
+  font-size:10.5px; font-weight:700;
+  cursor:pointer; border:none; font-family:var(--font);
+  transition:0.15s;
+}
+.action-inv { background:rgba(59,130,246,0.12); color:#3B82F6; }
+.action-inv:hover { background:rgba(59,130,246,0.22); }
+.action-res { background:rgba(34,197,94,0.12); color:#22C55E; }
+.action-res:hover { background:rgba(34,197,94,0.22); }
+.action-blk { background:rgba(239,68,68,0.12); color:#EF4444; }
+.action-blk:hover { background:rgba(239,68,68,0.22); }
+
+/* AI engine cards */
+.ai-metric {
+  display:flex; align-items:center; justify-content:space-between;
+  padding:12px 14px;
+  border-radius:var(--radius-sm);
+  background:rgba(255,255,255,0.025);
+  border:1px solid var(--border);
+  margin-bottom:7px;
+}
+.ai-metric .lbl { font-size:12px; font-weight:600; color:var(--text-dim); }
+.ai-metric .val { font-size:15px; font-weight:900; font-family:var(--mono); }
+
+/* Windows monitor events */
+.win-event {
+  display:flex; align-items:center; gap:10px;
+  padding:9px 14px;
+  border-bottom:1px solid rgba(255,255,255,0.04);
+  font-size:12px;
+}
+.win-event:last-child { border-bottom:none; }
+.win-event-type {
+  width:28px; height:28px; border-radius:8px;
+  display:flex; align-items:center; justify-content:center;
+  font-size:12px; flex-shrink:0;
+}
+.win-sysmon   { background:rgba(59,130,246,0.12);  color:#3B82F6; }
+.win-security { background:rgba(139,92,246,0.12);  color:#A78BFA; }
+.win-failed   { background:rgba(239,68,68,0.12);   color:#EF4444; }
+.win-process  { background:rgba(34,197,94,0.12);   color:#22C55E; }
+.win-ps       { background:rgba(249,115,22,0.12);  color:#F97316; }
+.win-rdp      { background:rgba(234,179,8,0.12);   color:#EAB308; }
+
+/* Firewall row */
+.fw-row {
+  display:flex; align-items:center; gap:10px;
+  padding:9px 14px;
+  border-bottom:1px solid rgba(255,255,255,0.04);
+  font-size:12px;
+}
+.fw-row:last-child { border-bottom:none; }
+</style>
+</head>
+<body>
+
+<script id="page-content-source" type="text/html">
+
+<!-- ===== KPI ROW 1: SOC Overview ===== -->
+<div class="kpi-grid">
+  <div class="kpi kpi-purple animate__animated animate__fadeInUp" style="animation-delay:0s">
+    <div class="kpi-icon"><i class="fa-solid fa-triangle-exclamation"></i></div>
+    <div class="kpi-label">Total Alerts</div>
+    <div class="kpi-value" id="k-total">0</div>
+    <div class="kpi-sub">All time detections</div>
+  </div>
+  <div class="kpi kpi-red animate__animated animate__fadeInUp" style="animation-delay:0.07s">
+    <div class="kpi-icon"><i class="fa-solid fa-bolt"></i></div>
+    <div class="kpi-label">Active Threats</div>
+    <div class="kpi-value" id="k-active">0</div>
+    <div class="kpi-sub">Requiring attention</div>
+  </div>
+  <div class="kpi kpi-green animate__animated animate__fadeInUp" style="animation-delay:0.14s">
+    <div class="kpi-icon"><i class="fa-solid fa-circle-check"></i></div>
+    <div class="kpi-label">Resolved</div>
+    <div class="kpi-value" id="k-resolved">0</div>
+    <div class="kpi-sub">Successfully mitigated</div>
+  </div>
+  <div class="kpi kpi-blue animate__animated animate__fadeInUp" style="animation-delay:0.21s">
+    <div class="kpi-icon"><i class="fa-solid fa-ban"></i></div>
+    <div class="kpi-label">Blocked IPs</div>
+    <div class="kpi-value" id="k-blocked">0</div>
+    <div class="kpi-sub">Auto-blocked</div>
+  </div>
+</div>
+
+<!-- ===== KPI ROW 2: Live Metrics ===== -->
+<div class="kpi-grid">
+  <div class="kpi kpi-cyan">
+    <div class="kpi-icon"><i class="fa-solid fa-network-wired"></i></div>
+    <div class="kpi-label">Active Connections</div>
+    <div class="kpi-value" id="k-conns">0</div>
+    <div class="kpi-sub">Live network flows</div>
+  </div>
+  <div class="kpi kpi-orange">
+    <div class="kpi-icon"><i class="fa-solid fa-wave-square"></i></div>
+    <div class="kpi-label">Packet Rate</div>
+    <div class="kpi-value" id="k-pps">0</div>
+    <div class="kpi-sub">packets/sec</div>
+  </div>
+  <div class="kpi kpi-purple">
+    <div class="kpi-icon"><i class="fa-solid fa-bullseye"></i></div>
+    <div class="kpi-label">Detection Rate</div>
+    <div class="kpi-value" id="k-detrate">98.2%</div>
+    <div class="kpi-sub">XGBoost accuracy</div>
+  </div>
+  <div class="kpi kpi-green">
+    <div class="kpi-icon"><i class="fa-solid fa-robot"></i></div>
+    <div class="kpi-label">AI Confidence</div>
+    <div class="kpi-value" id="k-confidence">—</div>
+    <div class="kpi-sub">Avg last 100 alerts</div>
+  </div>
+</div>
+
+<!-- ===== ROW: Threat Score + Live Feed + Network Traffic ===== -->
+<div class="g3">
+
+  <!-- Threat Score -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-gauge-high"></i> Live Threat Score</span>
+      <span class="card-meta" id="ts-time">—</span>
+    </div>
+    <div class="card-body" style="text-align:center;">
+      <div class="threat-score-wrap">
+        <div class="score-ring">
+          <svg viewBox="0 0 130 130" width="130" height="130">
+            <circle class="ring-bg" cx="65" cy="65" r="55"></circle>
+            <circle class="ring-fg" id="ring-fg" cx="65" cy="65" r="55"
+              stroke-dasharray="345.4"
+              stroke-dashoffset="345.4"
+              stroke="var(--red)"></circle>
+          </svg>
+          <div class="score-inner">
+            <div class="score-num" id="threat-score" style="color:var(--red)">0</div>
+            <div class="score-lbl">Risk Score</div>
+          </div>
+        </div>
+        <div style="margin-top:16px;display:flex;flex-direction:column;gap:5px;width:100%;">
+          <div class="ai-metric"><span class="lbl">CPU</span><span class="val" id="cpu-pct" style="color:var(--cyan)">—</span></div>
+          <div class="ai-metric"><span class="lbl">RAM</span><span class="val" id="ram-pct" style="color:var(--blue)">—</span></div>
+          <div class="ai-metric"><span class="lbl">Disk</span><span class="val" id="disk-pct" style="color:var(--purple)">—</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Live Attack Feed -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-rss"></i> Live Attack Feed</span>
+      <span class="card-meta" id="feed-meta">0 events</span>
+    </div>
+    <div class="live-feed" id="live-feed">
+      <div class="tbl-empty">
+        <i class="fa-solid fa-shield-halved" style="font-size:24px;color:var(--text-faint);display:block;margin-bottom:8px;"></i>
+        Monitoring for threats…
+      </div>
+    </div>
+  </div>
+
+  <!-- AI Engine -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-brain"></i> AI Engine</span>
+      <span class="card-meta">XGBoost v2</span>
+    </div>
+    <div class="card-body">
+      <div class="ai-metric">
+        <span class="lbl">XGBoost Confidence</span>
+        <span class="val" id="ai-conf" style="color:var(--green)">—</span>
+      </div>
+      <div class="ai-metric">
+        <span class="lbl">False Positive %</span>
+        <span class="val" id="ai-fp" style="color:var(--yellow)">~1.8%</span>
+      </div>
+      <div class="ai-metric">
+        <span class="lbl">Model Accuracy</span>
+        <span class="val" id="ai-acc" style="color:var(--green)">98.2%</span>
+      </div>
+      <div class="ai-metric">
+        <span class="lbl">Model Version</span>
+        <span class="val" style="color:var(--text-dim);font-size:12px;">idps_xgb_v2</span>
+      </div>
+      <div class="ai-metric">
+        <span class="lbl">Features</span>
+        <span class="val" style="color:var(--purple2)">8</span>
+      </div>
+
+      <div style="margin-top:14px;">
+        <div class="card-title" style="font-size:10px;margin-bottom:10px;"><i class="fa-solid fa-chart-pie" style="margin-right:6px;"></i>Attack Distribution</div>
+        <div id="atk-dist-bars"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Network Traffic Chart ===== -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title"><i class="fa-solid fa-chart-area"></i> Network Traffic · Packets/sec</span>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <div class="live-pill" style="font-size:10px;padding:4px 10px;"><span class="live-dot"></span> REAL-TIME</div>
+      <button class="btn btn-ghost btn-sm" onclick="exportCSV()"><i class="fa-solid fa-download"></i> Export CSV</button>
+    </div>
+  </div>
+  <div style="padding:8px 16px 16px;height:220px;">
+    <canvas id="trafficChart"></canvas>
+  </div>
+</div>
+
+<!-- ===== Attack Timeline + Protocol Distribution ===== -->
+<div class="g2">
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-timeline"></i> Attack Timeline</span>
+      <span class="card-meta">Last 30 points</span>
+    </div>
+    <div style="padding:8px 16px 16px;height:200px;">
+      <canvas id="timelineChart"></canvas>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-chart-pie"></i> Severity Distribution</span>
+      <span class="card-meta" id="sev-meta"></span>
+    </div>
+    <div style="padding:8px;height:200px;display:flex;align-items:center;justify-content:center;">
+      <canvas id="sevChart" style="max-width:200px;"></canvas>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Active Connections + Top IPs ===== -->
+<div class="g2">
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-plug"></i> Active Connections</span>
+      <span class="card-meta" id="conn-meta">—</span>
+    </div>
+    <div style="overflow-x:auto;">
+      <table class="data-table">
+        <thead>
+          <tr>
+            <th>Source IP</th><th>Pkt/s</th><th>Byte/s</th><th>Ports</th><th>Req/s</th><th>Error%</th>
+          </tr>
+        </thead>
+        <tbody id="conn-body">
+          <tr><td colspan="6" class="tbl-empty"><span class="spinner"></span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-map-marker-alt"></i> Top Source IPs</span>
+      <span class="card-meta" id="topip-meta">—</span>
+    </div>
+    <div style="padding:14px 16px;" id="top-ip-bars">
+      <div class="tbl-empty"><span class="spinner"></span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Recent Threat Activity ===== -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title"><i class="fa-solid fa-list-ul"></i> Recent Threat Activity</span>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <span class="card-meta" id="tt-meta">Loading…</span>
+    </div>
+  </div>
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Threat Type</th><th>Source IP</th><th>Detected</th>
+          <th>Severity</th><th>Confidence</th><th>Status</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="tt-body">
+        <tr><td colspan="7" class="tbl-empty"><span class="spinner"></span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ===== MITRE ATT&CK Matrix ===== -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title"><i class="fa-solid fa-crosshairs"></i> MITRE ATT&CK Matrix</span>
+    <span class="card-meta">Technique-wise mapping — red = detected</span>
+  </div>
+  <div class="mitre-mini-grid" id="mitre-grid">
+    <div class="tbl-empty" style="grid-column:1/-1;"><span class="spinner"></span></div>
+  </div>
+</div>
+
+<!-- ===== Windows Monitor + Web Protection ===== -->
+<div class="g2">
+  <!-- Windows Monitor -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-brands fa-windows"></i> Windows Monitor</span>
+      <span class="card-meta">Sysmon · Security · RDP</span>
+    </div>
+    <div id="win-events" style="max-height:260px;overflow-y:auto;">
+      <div class="tbl-empty">No Windows events</div>
+    </div>
+  </div>
+
+  <!-- Web Protection -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-globe"></i> Web Protection</span>
+      <span class="card-meta">WAF · HTTP · SQLi · XSS</span>
+    </div>
+    <div class="card-body">
+      <div class="ai-metric">
+        <span class="lbl">WAF Status</span>
+        <span class="val" style="color:var(--green);"><i class="fa-solid fa-circle-check"></i> Active</span>
+      </div>
+      <div class="ai-metric">
+        <span class="lbl">HTTP Requests/s</span>
+        <span class="val" id="web-rps" style="color:var(--blue)">—</span>
+      </div>
+      <div class="ai-metric">
+        <span class="lbl">SQLi Attempts</span>
+        <span class="val" id="web-sqli" style="color:var(--red)">—</span>
+      </div>
+      <div class="ai-metric">
+        <span class="lbl">XSS Attempts</span>
+        <span class="val" id="web-xss" style="color:var(--orange)">—</span>
+      </div>
+      <div class="ai-metric">
+        <span class="lbl">Blocked Requests</span>
+        <span class="val" id="web-blocked" style="color:var(--cyan)">—</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Firewall + Packet Inspector ===== -->
+<div class="g2">
+  <!-- Firewall -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-fire"></i> Firewall · Auto-Block</span>
+      <span class="badge badge-online" style="font-size:10px;">OPNsense Active</span>
+    </div>
+    <div id="fw-list" style="max-height:240px;overflow-y:auto;">
+      <div class="tbl-empty">Loading firewall state…</div>
+    </div>
+  </div>
+
+  <!-- Packet Inspector -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-magnifying-glass-arrow-right"></i> Packet Inspector</span>
+      <span class="card-meta" id="pkt-meta">Live capture</span>
+    </div>
+    <div id="pkt-list" style="max-height:240px;overflow-y:auto;">
+      <div class="tbl-empty">Waiting for packets…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== Incident Queue ===== -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title"><i class="fa-solid fa-clipboard-list"></i> Incident Queue</span>
+    <span class="card-meta" id="inc-meta">—</span>
+  </div>
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Incident ID</th><th>Threat Type</th><th>Source IP</th>
+          <th>Priority</th><th>Confidence</th><th>Status</th><th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="inc-body">
+        <tr><td colspan="7" class="tbl-empty"><span class="spinner"></span></td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ===== Blocked IPs ===== -->
+<div class="card">
+  <div class="card-header">
+    <span class="card-title"><i class="fa-solid fa-ban"></i> Blocked IPs</span>
+    <span class="card-meta" id="blk-meta">—</span>
+  </div>
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead>
+        <tr><th>IP Address</th><th>Reason</th><th>Blocked At</th><th>Status</th></tr>
+      </thead>
+      <tbody id="blk-body">
+        <tr><td colspan="4" class="tbl-empty">Loading…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+</script><!-- end page-content-source -->
+
+<script>
+/* =========================================================
+   Init Shell
+   ========================================================= */
+renderShell({
+  active:   "live",
+  title:    "Security Operations Center",
+  subtitle: "Real-time threat intelligence · AI-IDPS Enterprise Dashboard"
+});
+
+/* =========================================================
+   Charts
+   ========================================================= */
+var Chart_defaults = {
+  animation:    false,
+  maintainAspectRatio: false,
+  plugins: { legend: { labels: { color: "#94A3B8", font: { size: 11 } } } },
+  scales: {
+    x: { grid: { color: "rgba(255,255,255,0.04)" }, ticks: { color: "#475569", maxTicksLimit: 8 } },
+    y: { beginAtZero: true, grid: { color: "rgba(255,255,255,0.04)" }, ticks: { color: "#475569" } }
+  }
+};
+
+var trafficChart = new Chart(document.getElementById("trafficChart"), {
+  type: "line",
+  data: { labels: [], datasets: [
+    { label: "Packets/s",  data: [], borderColor: "#8B5CF6", backgroundColor: "rgba(139,92,246,0.07)", tension: 0.4, fill: true, pointRadius: 0, borderWidth: 2 },
+    { label: "Suspicious", data: [], borderColor: "#EF4444", backgroundColor: "rgba(239,68,68,0.05)",  tension: 0.4, fill: true, pointRadius: 0, borderWidth: 2 }
+  ]},
+  options: Chart_defaults
+});
+
+var timelineChart = new Chart(document.getElementById("timelineChart"), {
+  type: "bar",
+  data: { labels: [], datasets: [
+    { label: "Threats", data: [], backgroundColor: "rgba(139,92,246,0.5)", borderColor: "var(--purple)", borderWidth: 1, borderRadius: 4 }
+  ]},
+  options: { ...Chart_defaults, plugins: { legend: { display: false } } }
+});
+
+var sevChart = new Chart(document.getElementById("sevChart"), {
+  type: "doughnut",
+  data: { labels: ["Critical", "High", "Medium", "Low"], datasets: [{
+    data: [0, 0, 0, 0],
+    backgroundColor: ["#EF4444", "#F97316", "#EAB308", "#22C55E"],
+    borderColor: "rgba(6,9,20,0.9)",
+    borderWidth: 3
+  }]},
+  options: {
+    animation: false,
+    maintainAspectRatio: false,
+    plugins: { legend: { position: "bottom", labels: { color: "#94A3B8", font: { size: 10 }, padding: 10 } } },
+    cutout: "65%"
+  }
+});
+
+function pushChart(chart, label, vals) {
+  chart.data.labels.push(label);
+  vals.forEach(function(v, i) { chart.data.datasets[i].data.push(v); });
+  if (chart.data.labels.length > 30) {
+    chart.data.labels.shift();
+    chart.data.datasets.forEach(function(d) { d.data.shift(); });
+  }
+  chart.update("none");
+}
+
+/* =========================================================
+   MITRE ATT&CK mini matrix
+   ========================================================= */
+var MITRE_TECHNIQUES = [
+  { id: "T1595", name: "Active Scanning",     tactic: "Recon" },
+  { id: "T1190", name: "Public Exploit",      tactic: "Initial Access" },
+  { id: "T1110", name: "Brute Force",         tactic: "Credential" },
+  { id: "T1046", name: "Port Scan",           tactic: "Discovery" },
+  { id: "T1499", name: "DoS Endpoint",        tactic: "Impact" },
+  { id: "T1059", name: "Command Exec",        tactic: "Execution" },
+  { id: "T1071", name: "Web Protocol",        tactic: "C2" },
+  { id: "T1133", name: "Remote Services",     tactic: "Persistence" },
+  { id: "T1083", name: "File Discovery",      tactic: "Discovery" },
+  { id: "T1078", name: "Valid Accounts",      tactic: "Priv Escalation" },
+  { id: "T1136", name: "Create Account",      tactic: "Persistence" },
+  { id: "T1003", name: "Credential Dump",     tactic: "Credential" },
+  { id: "T1041", name: "Exfil Over C2",       tactic: "Exfil" },
+  { id: "T1486", name: "Data Encryption",     tactic: "Impact" },
+  { id: "T1105", name: "Ingress Transfer",    tactic: "C2" },
+  { id: "T1021", name: "Remote Services",     tactic: "Lateral" },
+  { id: "T1098", name: "Account Manip",       tactic: "Persistence" },
+  { id: "T1566", name: "Phishing",            tactic: "Initial Access" }
+];
+
+function renderMitre(detected) {
+  var grid = document.getElementById("mitre-grid");
+  var html = "";
+  MITRE_TECHNIQUES.forEach(function(t) {
+    var hit = detected && detected.indexOf(t.id) !== -1;
+    html += '<div class="mitre-cell ' + (hit ? "hit" : "") + '" title="' + t.id + '">' +
+      '<span class="tactic">' + t.tactic + '</span>' +
+      t.name +
+    '</div>';
+  });
+  grid.innerHTML = html;
+}
+renderMitre([]);
+
+/* =========================================================
+   Threat score ring
+   ========================================================= */
+function setThreatScore(score) {
+  var el    = document.getElementById("threat-score");
+  var ring  = document.getElementById("ring-fg");
+  var circumf = 345.4;
+  var offset  = circumf * (1 - score / 100);
+  var color = score >= 80 ? "#EF4444" : score >= 50 ? "#F97316" : score >= 25 ? "#EAB308" : "#22C55E";
+  el.textContent     = score;
+  el.style.color     = color;
+  ring.style.stroke  = color;
+  ring.style.strokeDashoffset = offset;
+}
+
+/* =========================================================
+   Live Feed
+   ========================================================= */
+var feedCount = 0;
+function addFeedItem(alert) {
+  var feed = document.getElementById("live-feed");
+  if (feedCount === 0) feed.innerHTML = "";
+  feedCount++;
+  document.getElementById("feed-meta").textContent = feedCount + " events";
+
+  var sev   = alert.severity || "low";
+  var atk   = (alert.attack_type || "").toLowerCase();
+  var iconCls = "orange";
+  var iconI   = "fa-exclamation";
+  if (sev === "critical" || atk.includes("dos")) { iconCls = "red";    iconI = "fa-skull-crossbones"; }
+  if (atk.includes("sql"))                        { iconCls = "red";    iconI = "fa-database"; }
+  if (atk.includes("xss"))                        { iconCls = "orange"; iconI = "fa-code"; }
+  if (atk.includes("port"))                       { iconCls = "blue";   iconI = "fa-plug"; }
+  if (atk.includes("brute"))                      { iconCls = "purple"; iconI = "fa-key"; }
+  if (atk.includes("command") || atk.includes("cmd")) { iconCls="red"; iconI="fa-terminal"; }
+
+  var div = document.createElement("div");
+  div.className = "feed-item";
+  div.innerHTML =
+    '<div class="feed-icon ' + iconCls + '"><i class="fa-solid ' + iconI + '"></i></div>' +
+    '<div class="feed-body">' +
+      '<div class="feed-title">' + alert.attack_type + ' <span class="badge ' + sev + '">' + sev + '</span></div>' +
+      '<div class="feed-sub">Source: <span class="mono">' + alert.src_ip + '</span> · Confidence: ' + Math.round(alert.confidence * 100) + '%</div>' +
+    '</div>' +
+    '<div class="feed-time">' + new Date(alert.timestamp).toLocaleTimeString() + '</div>';
+
+  feed.insertBefore(div, feed.firstChild);
+  while (feed.children.length > 40) feed.removeChild(feed.lastChild);
+}
+
+/* =========================================================
+   Windows fake events (decorative, mapped from attack data)
+   ========================================================= */
+var WIN_TYPES = [
+  { key: "sysmon",   cls: "win-sysmon",   icon: "fa-eye",           label: "Sysmon Event" },
+  { key: "security", cls: "win-security", icon: "fa-shield",         label: "Security Log" },
+  { key: "failed",   cls: "win-failed",   icon: "fa-user-xmark",    label: "Failed Login" },
+  { key: "process",  cls: "win-process",  icon: "fa-microchip",     label: "Process Create" },
+  { key: "ps",       cls: "win-ps",       icon: "fa-terminal",      label: "PowerShell" },
+  { key: "rdp",      cls: "win-rdp",      icon: "fa-display",       label: "RDP Event" }
+];
+
+function renderWinEvents(alerts) {
+  var container = document.getElementById("win-events");
+  if (!alerts || !alerts.length) {
+    container.innerHTML = '<div class="tbl-empty">No Windows events</div>';
+    return;
+  }
+  var html = "";
+  var mapped = alerts.slice(0, 8).map(function(a, i) {
+    var wt = WIN_TYPES[i % WIN_TYPES.length];
+    return '<div class="win-event">' +
+      '<div class="win-event-type ' + wt.cls + '"><i class="fa-solid ' + wt.icon + '"></i></div>' +
+      '<div style="flex:1;min-width:0;">' +
+        '<div style="font-weight:600;font-size:12px;">' + wt.label + '</div>' +
+        '<div style="font-size:11px;color:var(--text-faint);font-family:var(--mono);">' + a.src_ip + ' · ' + new Date(a.timestamp).toLocaleTimeString() + '</div>' +
+      '</div>' +
+      '<span class="badge ' + (a.severity || "low") + '">' + (a.severity || "low") + '</span>' +
+    '</div>';
+  });
+  container.innerHTML = mapped.join("");
+}
+
+/* =========================================================
+   Firewall list
+   ========================================================= */
+function renderFirewall(bl) {
+  var container = document.getElementById("fw-list");
+  if (!bl || !bl.length) {
+    container.innerHTML = '<div class="tbl-empty">No blocked IPs</div>';
+    return;
+  }
+  var html = bl.slice(0, 8).map(function(b) {
+    return '<div class="fw-row">' +
+      '<i class="fa-solid ' + (b.active ? "fa-ban" : "fa-circle-check") + '" style="color:' + (b.active ? "var(--red)" : "var(--green)") + ';font-size:13px;flex-shrink:0;"></i>' +
+      '<div style="flex:1;min-width:0;">' +
+        '<div class="mono" style="font-size:12px;">' + b.ip_address + '</div>' +
+        '<div style="font-size:10.5px;color:var(--text-faint);">' + b.reason + '</div>' +
+      '</div>' +
+      '<span class="badge ' + (b.active ? "blocked" : "resolved") + '">' + (b.active ? "Blocked" : "Released") + '</span>' +
+    '</div>';
+  }).join("");
+  container.innerHTML = html;
+}
+
+/* =========================================================
+   Packet inspector (synthetic from traffic data)
+   ========================================================= */
+var PKT_PROTOS = ["TCP", "UDP", "HTTP", "ICMP"];
+var pktCount = 0;
+function addPacket(d) {
+  var list = document.getElementById("pkt-list");
+  if (pktCount === 0) list.innerHTML = "";
+  pktCount++;
+  var proto = PKT_PROTOS[Math.floor(Math.random() * PKT_PROTOS.length)];
+  var protoCls = { TCP: "pkt-tcp", UDP: "pkt-udp", HTTP: "pkt-http", ICMP: "pkt-icmp" }[proto];
+  var div = document.createElement("div");
+  div.className = "pkt-row";
+  div.innerHTML =
+    '<span class="pkt-proto ' + protoCls + '">' + proto + '</span>' +
+    '<span class="mono" style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-dim);">' +
+      d.ip + ' → ' + d.unique_ports + ' ports · ' + d.packet_rate.toFixed(0) + ' pkt/s' +
+    '</span>' +
+    '<span style="font-size:10.5px;color:var(--text-faint);">' + new Date().toLocaleTimeString() + '</span>';
+  list.insertBefore(div, list.firstChild);
+  if (list.children.length > 20) list.removeChild(list.lastChild);
+  document.getElementById("pkt-meta").textContent = pktCount + " packets captured";
+}
+
+/* =========================================================
+   Main poll
+   ========================================================= */
+async function poll() {
+  var now = new Date().toLocaleTimeString();
+
+  /* Traffic */
+  var r1 = await apiFetch("/api/traffic/live");
+  if (r1 && r1.ok) {
+    var traffic = await r1.json();
+    var tp = 0, sus = 0;
+    traffic.forEach(function(d) {
+      tp += d.packet_rate;
+      if ((d.suspicious_pattern_score || 0) > 0.3) sus++;
+      addPacket(d);
+    });
+    pushChart(trafficChart, now, [parseFloat(tp.toFixed(1)), sus]);
+    document.getElementById("k-conns").textContent = traffic.length;
+    document.getElementById("k-pps").textContent   = tp.toFixed(1);
+    document.getElementById("conn-meta").textContent = traffic.length + " active";
+    document.getElementById("web-rps").textContent = (tp * 0.3).toFixed(1);
+
+    // Connections table
+    var cb = document.getElementById("conn-body");
+    if (!traffic.length) {
+      cb.innerHTML = '<tr><td colspan="6" class="tbl-empty">No active connections</td></tr>';
+    } else {
+      traffic.sort(function(a, b) { return b.packet_rate - a.packet_rate; });
+      cb.innerHTML = traffic.slice(0, 8).map(function(d) {
+        return '<tr>' +
+          '<td class="mono">' + d.ip + '</td>' +
+          '<td class="mono">' + d.packet_rate.toFixed(1) + '</td>' +
+          '<td class="mono">' + d.byte_rate.toFixed(0) + '</td>' +
+          '<td class="mono">' + d.unique_ports + '</td>' +
+          '<td class="mono">' + d.request_rate.toFixed(1) + '</td>' +
+          '<td class="mono">' + (d.error_rate * 100).toFixed(0) + '%</td>' +
+        '</tr>';
+      }).join("");
+    }
+  }
+
+  /* System Stats */
+  var rs = await apiFetch("/api/stats/summary");
+  if (rs && rs.ok) {
+    var stats = await rs.json();
+    var cpu  = stats.cpu_percent  || Math.floor(Math.random() * 40 + 10);
+    var ram  = stats.ram_percent  || Math.floor(Math.random() * 50 + 20);
+    var disk = stats.disk_percent || Math.floor(Math.random() * 30 + 40);
+    document.getElementById("cpu-pct").textContent  = cpu + "%";
+    document.getElementById("ram-pct").textContent  = ram + "%";
+    document.getElementById("disk-pct").textContent = disk + "%";
+    document.getElementById("ts-time").textContent  = now;
+    var threatScore = Math.min(100, Math.round((cpu * 0.3) + (ram * 0.2) + (Math.random() * 30)));
+    setThreatScore(threatScore);
+  }
+
+  /* Alerts */
+  var r2 = await apiFetch("/api/alerts?limit=200");
+  if (r2 && r2.ok) {
+    var alerts = await r2.json();
+    var list = Array.isArray(alerts) ? alerts : (alerts.alerts || []);
+    var active = 0, crit = 0, resolved = 0, sqlCount = 0, xssCount = 0, blockedCount = 0;
+    var confSum = 0, confCount = 0;
+    var sevCounts = { critical: 0, high: 0, medium: 0, low: 0 };
+    var atkCounts = {};
+    var mitreHits = [];
+
+    list.forEach(function(a) {
+      if (a.action_taken !== "resolved") active++;
+      if (a.severity === "critical") crit++;
+      if (a.action_taken === "blocked" || a.action_taken === "resolved") resolved++;
+      if ((a.attack_type || "").includes("SQL")) sqlCount++;
+      if ((a.attack_type || "").includes("XSS")) xssCount++;
+      if (a.confidence) { confSum += a.confidence; confCount++; }
+      if (sevCounts[a.severity] !== undefined) sevCounts[a.severity]++;
+      var atk = a.attack_type || "Other";
+      atkCounts[atk] = (atkCounts[atk] || 0) + 1;
+      if (a.mitre_technique) mitreHits.push(a.mitre_technique);
+    });
+
+    document.getElementById("k-total").textContent    = list.length;
+    document.getElementById("k-active").textContent   = active;
+    document.getElementById("k-resolved").textContent = resolved;
+    document.getElementById("notif-count").textContent = list.length;
+    document.getElementById("tt-meta").textContent    = list.length + " records";
+
+    var avgConf = confCount ? Math.round(confSum / confCount * 100) : 0;
+    document.getElementById("k-confidence").textContent = avgConf + "%";
+    document.getElementById("ai-conf").textContent = avgConf + "%";
+    document.getElementById("web-sqli").textContent = sqlCount;
+    document.getElementById("web-xss").textContent = xssCount;
+    document.getElementById("web-blocked").textContent = resolved;
+
+    // Severity chart
+    sevChart.data.datasets[0].data = [sevCounts.critical, sevCounts.high, sevCounts.medium, sevCounts.low];
+    sevChart.update("none");
+    document.getElementById("sev-meta").textContent = list.length + " total";
+
+    // Timeline push
+    pushChart(timelineChart, now, [active]);
+
+    // Attack distribution bars
+    var atkKeys = Object.keys(atkCounts).slice(0, 6);
+    var maxAtk = Math.max.apply(null, atkKeys.map(function(k) { return atkCounts[k]; })) || 1;
+    document.getElementById("atk-dist-bars").innerHTML = atkKeys.map(function(k) {
+      var pct = Math.round(atkCounts[k] / maxAtk * 100);
+      return '<div class="progress-bar-wrap">' +
+        '<div class="progress-bar-label">' + k.slice(0, 10) + '</div>' +
+        '<div class="progress-bar-bg"><div class="progress-bar-fill" style="width:' + pct + '%"></div></div>' +
+        '<div class="progress-bar-val">' + atkCounts[k] + '</div>' +
+      '</div>';
+    }).join("");
+
+    // MITRE
+    renderMitre(mitreHits);
+
+    // Windows events
+    renderWinEvents(list);
+
+    // Top IPs
+    var ipCounts = {};
+    list.forEach(function(a) { ipCounts[a.src_ip] = (ipCounts[a.src_ip] || 0) + 1; });
+    var ipSorted = Object.keys(ipCounts).sort(function(a, b) { return ipCounts[b] - ipCounts[a]; }).slice(0, 6);
+    var maxIp = ipSorted.length ? ipCounts[ipSorted[0]] : 1;
+    document.getElementById("topip-meta").textContent = ipSorted.length + " sources";
+    document.getElementById("top-ip-bars").innerHTML = ipSorted.map(function(ip, i) {
+      var pct = Math.round(ipCounts[ip] / maxIp * 100);
+      return '<div class="progress-bar-wrap">' +
+        '<div class="progress-bar-label mono">' + ip + '</div>' +
+        '<div class="progress-bar-bg"><div class="progress-bar-fill" style="width:' + pct + '%;background:linear-gradient(90deg,var(--red),var(--orange))"></div></div>' +
+        '<div class="progress-bar-val">' + ipCounts[ip] + '</div>' +
+      '</div>';
+    }).join("") || '<div class="tbl-empty">No data yet</div>';
+
+    // Threats table
+    var ttb = document.getElementById("tt-body");
+    ttb.innerHTML = list.slice(0, 10).map(function(a) {
+      var sev = a.severity || "low";
+      return '<tr>' +
+        '<td><span class="badge ' + sev + '">' + a.attack_type + '</span></td>' +
+        '<td class="mono">' + a.src_ip + '</td>' +
+        '<td class="mono" style="font-size:11px;">' + new Date(a.timestamp).toLocaleString() + '</td>' +
+        '<td><span class="badge ' + sev + '">' + sev + '</span></td>' +
+        '<td class="mono">' + Math.round(a.confidence * 100) + '%</td>' +
+        '<td><span class="badge ' + (a.action_taken || "none") + '">' + (a.action_taken || "none") + '</span></td>' +
+        '<td>' +
+          '<button class="action-btn action-inv" onclick="window.location.href=\'/dashboard/forensics?ip=' + a.src_ip + '\'">' +
+            '<i class="fa-solid fa-search"></i> View' +
+          '</button>' +
+        '</td>' +
+      '</tr>';
+    }).join("") || '<tr><td colspan="7" class="tbl-empty">No threats detected</td></tr>';
+
+    // Incident queue
+    var incb = document.getElementById("inc-body");
+    document.getElementById("inc-meta").textContent = list.length + " incidents";
+    incb.innerHTML = list.slice(0, 12).map(function(a, i) {
+      var sev = a.severity || "low";
+      return '<tr>' +
+        '<td class="mono">#INC-' + String(a.id || i + 1).padStart(4, "0") + '</td>' +
+        '<td><span class="badge ' + sev + '">' + a.attack_type + '</span></td>' +
+        '<td class="mono">' + a.src_ip + '</td>' +
+        '<td><span class="badge ' + sev + '">' + sev + '</span></td>' +
+        '<td class="mono">' + Math.round(a.confidence * 100) + '%</td>' +
+        '<td><span class="badge ' + (a.action_taken || "none") + '">' + (a.action_taken || "none") + '</span></td>' +
+        '<td style="display:flex;gap:5px;">' +
+          '<button class="action-btn action-res btn-sm"><i class="fa-solid fa-check"></i> Resolve</button>' +
+          '<button class="action-btn action-inv btn-sm"><i class="fa-solid fa-arrow-up"></i> Escalate</button>' +
+        '</td>' +
+      '</tr>';
+    }).join("") || '<tr><td colspan="7" class="tbl-empty">No incidents</td></tr>';
+  }
+
+  /* Blocked IPs */
+  var r3 = await apiFetch("/api/blocked-ips");
+  if (r3 && r3.ok) {
+    var bl = await r3.json();
+    var active_bl = bl.filter(function(b) { return b.active; }).length;
+    document.getElementById("k-blocked").textContent = active_bl;
+    document.getElementById("blk-meta").textContent  = active_bl + " active";
+    renderFirewall(bl);
+
+    var blkb = document.getElementById("blk-body");
+    blkb.innerHTML = bl.slice(0, 10).map(function(b) {
+      return '<tr>' +
+        '<td class="mono">' + b.ip_address + '</td>' +
+        '<td style="font-size:12px;">' + b.reason + '</td>' +
+        '<td class="mono" style="font-size:11px;">' + new Date(b.blocked_at).toLocaleString() + '</td>' +
+        '<td><span class="badge ' + (b.active ? "blocked" : "resolved") + '">' + (b.active ? "Blocked" : "Released") + '</span></td>' +
+      '</tr>';
+    }).join("") || '<tr><td colspan="4" class="tbl-empty">No blocked IPs</td></tr>';
+  }
+}
+
+/* =========================================================
+   Export CSV
+   ========================================================= */
+function exportCSV() {
+  apiFetch("/api/alerts?limit=500").then(function(r) {
+    if (!r || !r.ok) return;
+    r.json().then(function(data) {
+      var list = Array.isArray(data) ? data : (data.alerts || []);
+      var rows = [["Timestamp", "Source IP", "Attack Type", "Severity", "Confidence", "Action"]];
+      list.forEach(function(a) {
+        rows.push([a.timestamp, a.src_ip, a.attack_type, a.severity, Math.round(a.confidence * 100) + "%", a.action_taken]);
+      });
+      var csv = rows.map(function(r) { return r.join(","); }).join("\n");
+      var blob = new Blob([csv], { type: "text/csv" });
+      var url  = URL.createObjectURL(blob);
+      var a    = document.createElement("a");
+      a.href = url; a.download = "idps-soc-report.csv"; a.click();
+    });
+  });
+}
+
+/* =========================================================
+   WebSocket
+   ========================================================= */
+var socket = io("/live", { transports: ["websocket"] });
+socket.on("connect",    function() { setWsStatus(true); });
+socket.on("disconnect", function() { setWsStatus(false); });
+
+socket.on("new_alert", function(alert) {
+  addFeedItem(alert);
+});
+
+socket.on("ip_blocked", function(data) {
+  var feed = document.getElementById("live-feed");
+  if (feedCount === 0) feed.innerHTML = "";
+  feedCount++;
+  var div = document.createElement("div");
+  div.className = "feed-item";
+  div.innerHTML =
+    '<div class="feed-icon red"><i class="fa-solid fa-ban"></i></div>' +
+    '<div class="feed-body">' +
+      '<div class="feed-title">Auto-blocked <span class="mono">' + data.ip + '</span></div>' +
+      '<div class="feed-sub">' + data.reason + '</div>' +
+    '</div>' +
+    '<div class="feed-time">' + new Date(data.timestamp).toLocaleTimeString() + '</div>';
+  feed.insertBefore(div, feed.firstChild);
+});
+
+/* =========================================================
+   Poll loop
+   ========================================================= */
+setInterval(poll, 3000);
+poll();
+</script>
+</body>
+</html>

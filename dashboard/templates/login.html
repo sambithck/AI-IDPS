@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI-IDPS | Sign In</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+  <style>
+    /* Particle canvas */
+    #particles { position: fixed; inset: 0; pointer-events: none; z-index: 0; }
+
+    /* Animated border glow on focus */
+    .login-box .input:focus { box-shadow: 0 0 0 3px rgba(139,92,246,0.12); }
+
+    /* Threat ticker at bottom */
+    .threat-ticker {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: rgba(6,9,20,0.95);
+      border-top: 1px solid rgba(239,68,68,0.2);
+      padding: 8px 24px;
+      font-size: 11px; color: #475569;
+      display: flex; align-items: center; gap: 12px;
+      z-index: 10; backdrop-filter: blur(20px);
+    }
+    .ticker-label {
+      color: var(--red); font-weight: 800; font-size: 10px;
+      text-transform: uppercase; letter-spacing: 1px;
+      flex-shrink: 0;
+    }
+    .ticker-text { overflow: hidden; white-space: nowrap; }
+    .ticker-inner { display: inline-block; animation: tickerScroll 30s linear infinite; }
+    @keyframes tickerScroll {
+      0%   { transform: translateX(100vw); }
+      100% { transform: translateX(-200%); }
+    }
+
+    /* Decorative stats strip */
+    .stat-strip {
+      display: flex; gap: 24px;
+      justify-content: center;
+      margin-top: 28px;
+    }
+    .stat-chip {
+      text-align: center;
+      padding: 10px 18px;
+      border-radius: 10px;
+      background: rgba(139,92,246,0.07);
+      border: 1px solid rgba(139,92,246,0.15);
+    }
+    .stat-chip .val { font-size: 20px; font-weight: 900; color: var(--purple2); }
+    .stat-chip .lbl { font-size: 9.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 1px; margin-top: 2px; }
+
+    /* Loading bar */
+    .login-loader {
+      height: 2px;
+      background: linear-gradient(90deg, var(--purple), var(--blue), var(--cyan));
+      background-size: 200%;
+      animation: loaderAnim 1.5s linear infinite;
+      border-radius: 2px;
+      margin-bottom: 20px;
+      display: none;
+    }
+    @keyframes loaderAnim { 0% { background-position: 200%; } 100% { background-position: -200%; } }
+    .login-loader.show { display: block; }
+  </style>
+</head>
+<body>
+<canvas id="particles"></canvas>
+
+<div class="login-wrap" style="position:relative;z-index:1;">
+  <div style="width:100%;max-width:440px;">
+    <div class="login-box">
+      <!-- Logo -->
+      <div class="login-logo">
+        <div class="mark">
+          <i class="fa-solid fa-shield-halved"></i>
+        </div>
+        <div>
+          <div class="title">AI-IDPS</div>
+          <div class="subtitle">Security Operations Center</div>
+        </div>
+      </div>
+
+      <div class="login-loader" id="loader"></div>
+
+      <h2>Welcome back</h2>
+      <div class="desc">Sign in to access the threat monitoring console</div>
+
+      <div class="field">
+        <label><i class="fa-solid fa-user" style="margin-right:6px;color:var(--purple);font-size:11px;"></i>Username</label>
+        <input id="username" class="input" placeholder="Enter your username" autocomplete="username">
+      </div>
+      <div class="field">
+        <label><i class="fa-solid fa-lock" style="margin-right:6px;color:var(--purple);font-size:11px;"></i>Password</label>
+        <div style="position:relative;">
+          <input id="password" type="password" class="input" placeholder="Enter your password" autocomplete="current-password" style="padding-right:42px;">
+          <span id="eye-btn" onclick="togglePwd()" style="position:absolute;right:12px;top:50%;transform:translateY(-50%);cursor:pointer;color:var(--text-faint);font-size:14px;">
+            <i class="fa-solid fa-eye"></i>
+          </span>
+        </div>
+      </div>
+
+      <button class="btn btn-primary" style="width:100%;justify-content:center;padding:12px;font-size:14px;margin-top:4px;" onclick="doLogin()">
+        <i class="fa-solid fa-right-to-bracket"></i> Sign In
+      </button>
+      <div class="login-error" id="error"></div>
+
+      <div class="login-hint">
+        <i class="fa-solid fa-circle-info" style="color:var(--purple);margin-right:4px;"></i>
+        Default: <strong>admin</strong> / <strong>ChangeMe123!</strong> — change immediately after first login.
+      </div>
+    </div>
+
+    <!-- Stats Strip -->
+    <div class="stat-strip">
+      <div class="stat-chip">
+        <div class="val" id="s-threats">—</div>
+        <div class="lbl">Threats Today</div>
+      </div>
+      <div class="stat-chip">
+        <div class="val" id="s-blocked">—</div>
+        <div class="lbl">IPs Blocked</div>
+      </div>
+      <div class="stat-chip">
+        <div class="val" id="s-uptime">99.9%</div>
+        <div class="lbl">Uptime</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Threat ticker -->
+<div class="threat-ticker">
+  <span class="ticker-label"><i class="fa-solid fa-triangle-exclamation"></i> LIVE THREAT FEED</span>
+  <div class="ticker-text">
+    <span class="ticker-inner" id="ticker">
+      SQL Injection detected from 192.168.1.45 · Port Scan from 10.0.0.12 · Brute Force attempt on admin portal · XSS payload blocked · DoS attack mitigated from 203.0.113.42 · Command Injection attempt blocked
+    </span>
+  </div>
+</div>
+
+<script>
+/* ---------- Particle Canvas ---------- */
+(function(){
+  var canvas = document.getElementById('particles');
+  var ctx = canvas.getContext('2d');
+  var particles = [];
+  function resize(){ canvas.width=window.innerWidth; canvas.height=window.innerHeight; }
+  window.addEventListener('resize', resize);
+  resize();
+  for(var i=0;i<60;i++){
+    particles.push({
+      x: Math.random()*canvas.width,
+      y: Math.random()*canvas.height,
+      r: Math.random()*1.5+0.5,
+      dx: (Math.random()-0.5)*0.3,
+      dy: (Math.random()-0.5)*0.3,
+      alpha: Math.random()*0.5+0.1
+    });
+  }
+  function draw(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    particles.forEach(function(p){
+      ctx.beginPath();
+      ctx.arc(p.x,p.y,p.r,0,Math.PI*2);
+      ctx.fillStyle='rgba(139,92,246,'+p.alpha+')';
+      ctx.fill();
+      p.x+=p.dx; p.y+=p.dy;
+      if(p.x<0||p.x>canvas.width) p.dx*=-1;
+      if(p.y<0||p.y>canvas.height) p.dy*=-1;
+    });
+    requestAnimationFrame(draw);
+  }
+  draw();
+})();
+
+/* ---------- Password toggle ---------- */
+function togglePwd(){
+  var inp = document.getElementById('password');
+  var icon = document.querySelector('#eye-btn i');
+  if(inp.type==='password'){ inp.type='text'; icon.className='fa-solid fa-eye-slash'; }
+  else { inp.type='password'; icon.className='fa-solid fa-eye'; }
+}
+
+/* ---------- Login ---------- */
+async function doLogin() {
+  var username = document.getElementById('username').value;
+  var password = document.getElementById('password').value;
+  var errEl    = document.getElementById('error');
+  var loader   = document.getElementById('loader');
+  errEl.textContent = '';
+  loader.classList.add('show');
+
+  try {
+    var resp = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+
+    loader.classList.remove('show');
+
+    if (!resp.ok) {
+      var data = await resp.json().catch(function(){ return {}; });
+      errEl.textContent = data.error || 'Login failed';
+      return;
+    }
+
+    var data = await resp.json();
+    localStorage.setItem('idps_token',    data.access_token);
+    localStorage.setItem('idps_role',     data.role);
+    localStorage.setItem('idps_username', data.username);
+    window.location.href = '/dashboard';
+  } catch(e) {
+    loader.classList.remove('show');
+    errEl.textContent = 'Server unreachable';
+  }
+}
+
+document.getElementById('password').addEventListener('keydown', function(e){ if(e.key==='Enter') doLogin(); });
+document.getElementById('username').addEventListener('keydown', function(e){ if(e.key==='Enter') document.getElementById('password').focus(); });
+
+/* ---------- Decorative stats ---------- */
+(async function(){
+  try {
+    var r = await fetch('/api/alerts?limit=1');
+    if(r && r.ok){
+      var d = await r.json();
+      var total = d.total || d.length || 0;
+      document.getElementById('s-threats').textContent = total;
+    }
+    var r2 = await fetch('/api/blocked-ips');
+    if(r2 && r2.ok){
+      var bl = await r2.json();
+      document.getElementById('s-blocked').textContent = bl.length || 0;
+    }
+  } catch(e){}
+})();
+</script>
+</body>
+</html>

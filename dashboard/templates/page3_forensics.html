@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI-IDPS | Incident Forensics</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+  <script src="/static/auth.js"></script>
+  <script src="/static/layout.js"></script>
+  <style>
+    /* Risk score */
+    .risk-gauge { display:flex;flex-direction:column;align-items:center;padding:16px 0; }
+    .risk-num   { font-size:58px;font-weight:900;letter-spacing:-3px;line-height:1; }
+    .risk-lbl   { font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:2px;margin-top:6px; }
+    .risk-bar-bg{ width:100%;height:8px;background:rgba(255,255,255,0.06);border-radius:4px;overflow:hidden;margin-top:14px; }
+    .risk-bar-fill { height:100%;border-radius:4px;transition:width 0.8s ease; }
+
+    /* Timeline */
+    .timeline { position:relative; padding-left:28px; }
+    .timeline::before { content:'';position:absolute;left:9px;top:0;bottom:0;width:2px;background:var(--border); }
+    .tl-item { position:relative;margin-bottom:14px; }
+    .tl-dot  { position:absolute;left:-24px;top:4px;width:10px;height:10px;border-radius:50%;border:2px solid; }
+    .tl-dot.red    { background:rgba(239,68,68,0.3);  border-color:var(--red); }
+    .tl-dot.orange { background:rgba(249,115,22,0.3); border-color:var(--orange); }
+    .tl-dot.blue   { background:rgba(59,130,246,0.3); border-color:var(--blue); }
+    .tl-dot.yellow { background:rgba(234,179,8,0.3);  border-color:var(--yellow); }
+    .tl-dot.green  { background:rgba(34,197,94,0.3);  border-color:var(--green); }
+    .tl-body { background:rgba(255,255,255,0.025);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 13px; }
+    .tl-title { font-size:12.5px;font-weight:600; }
+    .tl-sub   { font-size:11px;color:var(--text-faint);margin-top:2px; }
+    .tl-time  { font-size:10.5px;color:var(--text-faint);margin-top:3px;font-family:var(--mono); }
+
+    /* Summary */
+    .summary-mono { font-family:var(--mono);font-size:12px;line-height:1.8;color:#CBD5E1;white-space:pre-wrap; }
+
+    /* RBAC */
+    .rbac-card {
+      display:flex;flex-direction:column;align-items:center;padding:16px;
+      border-radius:var(--radius-sm);
+      background:rgba(255,255,255,0.025);
+      border:1px solid var(--border);
+      text-align:center; gap:6px;
+    }
+    .rbac-icon { font-size:26px;margin-bottom:4px; }
+    .rbac-label { font-size:12px;font-weight:700; }
+    .rbac-desc  { font-size:11px;color:var(--text-faint); }
+
+    /* Evidence timeline items */
+    .evidence-item {
+      display:flex;align-items:center;gap:12px;
+      padding:11px 14px;
+      border-bottom:1px solid rgba(255,255,255,0.04);
+    }
+    .evidence-item:last-child { border-bottom:none; }
+    .ev-icon { width:34px;height:34px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-size:15px;flex-shrink:0; }
+    .ev-icon.pcap    { background:rgba(59,130,246,0.12); color:#3B82F6; }
+    .ev-icon.log     { background:rgba(34,197,94,0.12);  color:#22C55E; }
+    .ev-icon.report  { background:rgba(249,115,22,0.12); color:#F97316; }
+    .ev-icon.capture { background:rgba(139,92,246,0.12); color:#A78BFA; }
+  </style>
+</head>
+<body>
+
+<script id="page-content-source" type="text/html">
+
+<!-- Search toolbar -->
+<div class="filter-bar">
+  <i class="fa-solid fa-magnifying-glass" style="color:var(--text-faint);"></i>
+  <input id="ip-input" class="finput" placeholder="Enter IP address, e.g. 192.168.1.100" style="width:280px;font-family:var(--mono);">
+  <button class="btn btn-primary" onclick="loadForensics()">
+    <i class="fa-solid fa-microscope"></i> Investigate
+  </button>
+  <span style="color:var(--text-faint);font-size:12px;" id="inv-status"></span>
+  <div style="margin-left:auto;display:flex;gap:8px;" id="action-btns" style="display:none;">
+    <button class="btn btn-ghost btn-sm" id="btn-pdf" onclick="downloadPDF()" style="display:none;">
+      <i class="fa-solid fa-file-pdf" style="color:var(--red);"></i> Incident PDF
+    </button>
+    <button class="btn btn-red btn-sm" id="btn-block" onclick="blockIp()" style="display:none;">
+      <i class="fa-solid fa-ban"></i> Block IP
+    </button>
+    <button class="btn btn-green btn-sm" id="btn-unblock" onclick="unblockIp()" style="display:none;">
+      <i class="fa-solid fa-circle-check"></i> Unblock IP
+    </button>
+  </div>
+</div>
+
+<!-- KPI strip (hidden until investigated) -->
+<div class="g4" id="kpi-strip" style="display:none;">
+  <div class="kpi kpi-red">
+    <div class="kpi-icon"><i class="fa-solid fa-triangle-exclamation"></i></div>
+    <div class="kpi-label">Total Alerts</div>
+    <div class="kpi-value" id="k-alerts">—</div>
+    <div class="kpi-sub">For this IP</div>
+  </div>
+  <div class="kpi kpi-blue">
+    <div class="kpi-icon"><i class="fa-solid fa-globe"></i></div>
+    <div class="kpi-label">Web Requests</div>
+    <div class="kpi-value" id="k-web">—</div>
+    <div class="kpi-sub">HTTP log entries</div>
+  </div>
+  <div class="kpi kpi-red">
+    <div class="kpi-icon"><i class="fa-solid fa-gauge-high"></i></div>
+    <div class="kpi-label">Risk Score</div>
+    <div class="kpi-value" id="k-risk">—</div>
+    <div class="kpi-sub">/ 100</div>
+  </div>
+  <div class="kpi kpi-purple">
+    <div class="kpi-icon"><i class="fa-solid fa-crosshairs"></i></div>
+    <div class="kpi-label">MITRE Techniques</div>
+    <div class="kpi-value" id="k-mitre">—</div>
+    <div class="kpi-sub">Mapped TTPs</div>
+  </div>
+</div>
+
+<!-- Row 1: Risk Score + GeoIP + MITRE -->
+<div class="g3" id="row-risk" style="display:none;">
+  <!-- Risk Score gauge -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-gauge-high"></i> Risk Score</span>
+    </div>
+    <div class="card-body">
+      <div class="risk-gauge">
+        <div class="risk-num" id="risk-num" style="color:var(--red)">—</div>
+        <div class="risk-lbl" id="risk-label">Not Investigated</div>
+        <div class="risk-bar-bg">
+          <div class="risk-bar-fill" id="risk-bar" style="width:0%;background:var(--red);"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- GeoIP -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-earth-americas"></i> GeoIP & Network Info</span>
+    </div>
+    <div class="card-body" id="geo-content">
+      <div class="tbl-empty">Investigate an IP to load GeoIP data</div>
+    </div>
+  </div>
+
+  <!-- MITRE ATT&CK -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-crosshairs"></i> MITRE ATT&CK Techniques</span>
+    </div>
+    <div class="card-body" id="mitre-content">
+      <div class="tbl-empty">No techniques detected</div>
+    </div>
+  </div>
+</div>
+
+<!-- Row 2: Behavior Chart + Alert Timeline -->
+<div class="g2" id="row-charts" style="display:none;">
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-radar"></i> Feature Behavior Profile</span>
+      <span class="card-meta">XGBoost input features</span>
+    </div>
+    <div style="padding:8px 16px 16px;height:260px;">
+      <canvas id="behaviorChart"></canvas>
+    </div>
+  </div>
+
+  <!-- Alert timeline (visual) -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-timeline"></i> Alert Timeline</span>
+      <span class="card-meta" id="alerts-count-meta"></span>
+    </div>
+    <div style="padding:14px;max-height:280px;overflow-y:auto;" id="alert-timeline">
+      <div class="tbl-empty">Enter an IP and click Investigate</div>
+    </div>
+  </div>
+</div>
+
+<!-- Alert details table -->
+<div class="card" id="card-table" style="display:none;">
+  <div class="card-header">
+    <span class="card-title"><i class="fa-solid fa-table-list"></i> Alert Details</span>
+    <span class="card-meta" id="tbl-meta"></span>
+  </div>
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead><tr><th>Time</th><th>Attack Type</th><th>Confidence</th><th>Severity</th><th>MITRE</th><th>Action</th></tr></thead>
+      <tbody id="ip-alerts-table">
+        <tr><td colspan="5" class="tbl-empty">Enter an IP and click Investigate</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Evidence & Forensics -->
+<div class="g2" id="card-evidence" style="display:none;">
+  <!-- PCAP Evidence -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-folder-open"></i> Forensics Evidence</span>
+      <span class="card-meta">PCAP · Logs · Reports</span>
+    </div>
+    <div id="evidence-list">
+      <div class="tbl-empty">Investigate an IP first</div>
+    </div>
+  </div>
+
+  <!-- RBAC Info -->
+  <div class="card">
+    <div class="card-header">
+      <span class="card-title"><i class="fa-solid fa-users-gear"></i> RBAC Access Control</span>
+    </div>
+    <div class="card-body">
+      <div class="g3" style="gap:10px;margin-bottom:14px;">
+        <div class="rbac-card">
+          <div class="rbac-icon" style="color:var(--red);">👑</div>
+          <div class="rbac-label" style="color:var(--red);">Admin</div>
+          <div class="rbac-desc">Full access · Block/Unblock · Reports</div>
+        </div>
+        <div class="rbac-card">
+          <div class="rbac-icon" style="color:var(--blue);">🔍</div>
+          <div class="rbac-label" style="color:var(--blue);">Analyst</div>
+          <div class="rbac-desc">Investigate · View forensics · Alert review</div>
+        </div>
+        <div class="rbac-card">
+          <div class="rbac-icon" style="color:var(--green);">👁</div>
+          <div class="rbac-label" style="color:var(--green);">Viewer</div>
+          <div class="rbac-desc">Read-only · Dashboard · Reports only</div>
+        </div>
+      </div>
+      <div style="padding:12px;border-radius:var(--radius-sm);background:rgba(255,255,255,0.025);border:1px solid var(--border);">
+        <div style="font-size:12px;font-weight:700;color:var(--text-dim);margin-bottom:6px;">Current Session</div>
+        <div style="display:flex;justify-content:space-between;font-size:12.5px;">
+          <span>User:</span><span class="mono" id="rbac-user" style="color:var(--purple2);">—</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:12.5px;margin-top:4px;">
+          <span>Role:</span><span id="rbac-role">—</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Incident Summary -->
+<div class="card" id="card-summary" style="display:none;">
+  <div class="card-header">
+    <span class="card-title"><i class="fa-solid fa-file-lines"></i> Incident Summary</span>
+    <button class="btn btn-ghost btn-sm" onclick="copySummary()"><i class="fa-solid fa-copy"></i> Copy</button>
+  </div>
+  <div class="card-body">
+    <pre class="summary-mono" id="summary-text"></pre>
+  </div>
+</div>
+
+<!-- Web Request Log -->
+<div class="card" id="card-web" style="display:none;">
+  <div class="card-header">
+    <span class="card-title"><i class="fa-solid fa-code"></i> Web Request Log</span>
+    <span class="card-meta" id="web-count-meta"></span>
+  </div>
+  <div style="overflow-x:auto;">
+    <table class="data-table">
+      <thead><tr><th>Time</th><th>Method</th><th>Path</th><th>Status</th><th>User-Agent</th></tr></thead>
+      <tbody id="web-log-table">
+        <tr><td colspan="5" class="tbl-empty">No web request logs</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+</script>
+
+<script>
+renderShell({
+  active:   "forensics",
+  title:    "Incident Forensics",
+  subtitle: "Deep-dive IP investigation · PCAP evidence · Risk scoring"
+});
+
+/* ---- Set RBAC info ---- */
+var curUser = localStorage.getItem("idps_username") || "—";
+var curRole = localStorage.getItem("idps_role") || "—";
+document.getElementById("rbac-user").textContent = curUser;
+document.getElementById("rbac-role").innerHTML   = '<span class="badge ' + (curRole==="admin"?"critical":curRole==="analyst"?"info":"low") + '">' + curRole + '</span>';
+
+var behaviorChart;
+var currentIP = null;
+
+function ts(iso) { var d = new Date(iso); return d.toLocaleDateString() + " " + d.toLocaleTimeString(); }
+
+/* ---- Risk score helpers ---- */
+function riskColor(s) {
+  return s >= 80 ? "#EF4444" : s >= 50 ? "#F97316" : s >= 25 ? "#EAB308" : "#22C55E";
+}
+function riskLabel(s) {
+  return s >= 80 ? "CRITICAL RISK" : s >= 50 ? "HIGH RISK" : s >= 25 ? "MEDIUM RISK" : "LOW RISK";
+}
+
+/* ---- GeoIP ---- */
+async function loadGeoIP(ip) {
+  var el = document.getElementById("geo-content");
+  el.innerHTML = '<div class="tbl-empty"><span class="spinner"></span> Loading GeoIP…</div>';
+  try {
+    var r = await fetch("https://ip-api.com/json/" + encodeURIComponent(ip) + "?fields=status,country,countryCode,regionName,city,isp,org,as,query");
+    var d = await r.json();
+    if (d.status !== "success") { el.innerHTML = '<div class="tbl-empty">GeoIP unavailable for this IP</div>'; return; }
+    var fields = [
+      ["IP Address",   d.query],
+      ["Country",      (d.countryCode ? d.countryCode + " · " : "") + d.country],
+      ["Region",       d.regionName],
+      ["City",         d.city],
+      ["ISP",          d.isp],
+      ["Organization", d.org],
+      ["ASN",          d.as],
+    ].filter(function(r) { return r[1]; });
+    el.innerHTML = fields.map(function(row) {
+      return '<div class="geo-row"><span class="geo-key">' + row[0] + '</span><span class="geo-val">' + row[1] + '</span></div>';
+    }).join("");
+  } catch(e) {
+    el.innerHTML = '<div class="tbl-empty">GeoIP lookup failed (no network?)</div>';
+  }
+}
+
+/* ---- Timeline visualization ---- */
+function renderTimeline(alerts) {
+  var container = document.getElementById("alert-timeline");
+  if (!alerts || !alerts.length) {
+    container.innerHTML = '<div class="tbl-empty">No alerts for this IP</div>';
+    return;
+  }
+  var dotColors = { critical:"red", high:"orange", medium:"yellow", low:"blue", info:"green" };
+  container.innerHTML = '<div class="timeline">' + alerts.slice(0, 12).map(function(a) {
+    var sev = a.severity || "low";
+    var dc  = dotColors[sev] || "blue";
+    return '<div class="tl-item">' +
+      '<div class="tl-dot ' + dc + '"></div>' +
+      '<div class="tl-body">' +
+        '<div class="tl-title">' + a.attack_type + ' <span class="badge ' + sev + '">' + sev + '</span></div>' +
+        '<div class="tl-sub">Confidence: ' + Math.round(a.confidence * 100) + '% · Action: <strong>' + a.action_taken + '</strong></div>' +
+        '<div class="tl-time">' + ts(a.timestamp) + '</div>' +
+      '</div>' +
+    '</div>';
+  }).join("") + '</div>';
+}
+
+/* ---- Evidence items ---- */
+function renderEvidence(ip, data) {
+  var el = document.getElementById("evidence-list");
+  var now = new Date().toLocaleString();
+  var items = [
+    { icon:"pcap",    label:"Packet Capture (PCAP)", desc:"Live capture · " + (data.web_request_count || 0) + " HTTP entries",     action:"download", id:"ev-pcap" },
+    { icon:"log",     label:"Alert Log Export",      desc:"CSV · " + (data.alert_count || 0) + " alerts recorded",                 action:"download", id:"ev-log" },
+    { icon:"report",  label:"Incident Report PDF",   desc:"Auto-generated · " + now,                                               action:"download", id:"ev-pdf" },
+    { icon:"capture", label:"Network Flow Analysis", desc:"Source: " + ip + " · Duration: last 24h",                              action:"view",     id:"ev-flow" },
+  ];
+  el.innerHTML = items.map(function(it) {
+    return '<div class="evidence-item">' +
+      '<div class="ev-icon ' + it.icon + '"><i class="fa-solid fa-' + (it.icon==="pcap"?"network-wired":it.icon==="log"?"file-lines":it.icon==="report"?"file-pdf":"chart-area") + '"></i></div>' +
+      '<div style="flex:1;min-width:0;">' +
+        '<div style="font-size:12.5px;font-weight:600;">' + it.label + '</div>' +
+        '<div style="font-size:11px;color:var(--text-faint);">' + it.desc + '</div>' +
+      '</div>' +
+      '<button class="btn btn-ghost btn-sm" onclick="evidenceAction(\'' + it.id + '\',\'' + ip + '\')">' +
+        '<i class="fa-solid fa-' + (it.action==="download"?"download":"eye") + '"></i> ' +
+        (it.action === "download" ? "Download" : "View") +
+      '</button>' +
+    '</div>';
+  }).join("");
+}
+
+function evidenceAction(id, ip) {
+  if (id === "ev-pcap" || id === "ev-log") {
+    apiFetch("/api/alerts/export/csv").then(function(r) {
+      if (!r || !r.ok) { alert("Download failed"); return; }
+      r.blob().then(function(blob) {
+        var url = URL.createObjectURL(blob);
+        var a   = document.createElement("a");
+        a.href = url; a.download = id === "ev-pcap" ? "capture_" + ip + ".pcap.csv" : "alerts_" + ip + ".csv"; a.click();
+      });
+    });
+  } else if (id === "ev-pdf") {
+    downloadPDF();
+  }
+}
+
+/* ---- Main Investigate ---- */
+async function loadForensics() {
+  var ip = (document.getElementById("ip-input").value || "").trim();
+  if (!ip) { alert("Please enter an IP address."); return; }
+  currentIP = ip;
+  document.getElementById("inv-status").textContent = "Investigating " + ip + "…";
+
+  // Show panels
+  ["kpi-strip","row-risk","row-charts","card-summary","card-web","card-table","card-evidence"].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.style.display = (id==="kpi-strip"||id==="row-risk"||id==="row-charts"||id==="card-evidence") ? "grid" : "block";
+  });
+  ["btn-pdf","btn-block","btn-unblock"].forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.style.display = "inline-flex";
+  });
+
+  window.history.replaceState(null, "", "/dashboard/forensics?ip=" + encodeURIComponent(ip));
+
+  var [r,] = await Promise.all([
+    apiFetch("/api/forensics/" + encodeURIComponent(ip)),
+    loadGeoIP(ip)
+  ]);
+
+  if (!r || !r.ok) {
+    document.getElementById("inv-status").textContent = "Error fetching data for " + ip;
+    return;
+  }
+  var data = await r.json();
+  document.getElementById("inv-status").textContent = "Investigation complete — " + data.alert_count + " alerts · " + data.web_request_count + " web requests";
+
+  // KPIs
+  document.getElementById("k-alerts").textContent = data.alert_count;
+  document.getElementById("k-web").textContent    = data.web_request_count;
+  var riskColor = data.risk_score >= 80 ? "var(--red)" : data.risk_score >= 50 ? "var(--orange)" : data.risk_score >= 25 ? "var(--yellow)" : "var(--green)";
+  document.getElementById("k-risk").textContent   = data.risk_score;
+  document.getElementById("k-risk").style.color   = riskColor;
+  document.getElementById("k-mitre").textContent  = (data.mitre_techniques || []).length;
+
+  // Risk gauge
+  var score = data.risk_score || 0;
+  var col   = riskColor;
+  document.getElementById("risk-num").textContent  = score;
+  document.getElementById("risk-num").style.color  = col;
+  document.getElementById("risk-label").textContent = riskLabel(score);
+  document.getElementById("risk-label").style.color = col;
+  document.getElementById("risk-bar").style.width  = score + "%";
+  document.getElementById("risk-bar").style.background = col;
+
+  // MITRE
+  var mitres = data.mitre_techniques || [];
+  document.getElementById("mitre-content").innerHTML = mitres.length
+    ? mitres.map(function(t) { return '<span class="mitre-tag">' + t + '</span>'; }).join("")
+    : '<div class="tbl-empty">No MITRE techniques mapped</div>';
+
+  // Behavior radar chart
+  var alerts = data.alerts || [];
+  if (alerts.length && alerts[0].features) {
+    var feat   = alerts[0].features;
+    var labels = ["Packet Rate","Byte Rate","Unique Ports","SYN Rate","UDP Rate","Request Rate","Error Rate","Suspicious"];
+    var keys   = ["packet_rate","byte_rate","unique_ports","syn_rate","udp_rate","request_rate","error_rate","suspicious_pattern_score"];
+    var vals   = keys.map(function(k) { return +(feat[k] || 0).toFixed(3); });
+    var maxV   = Math.max.apply(null, vals) || 1;
+    var norm   = vals.map(function(v) { return +(v / maxV * 100).toFixed(1); });
+    if (behaviorChart) behaviorChart.destroy();
+    behaviorChart = new Chart(document.getElementById("behaviorChart"), {
+      type: "radar",
+      data: {
+        labels: labels,
+        datasets: [{
+          label: "Feature Profile",
+          data: norm,
+          borderColor: "#8B5CF6",
+          backgroundColor: "rgba(139,92,246,0.12)",
+          pointBackgroundColor: "#8B5CF6",
+          borderWidth: 2,
+          pointRadius: 4
+        }]
+      },
+      options: {
+        maintainAspectRatio: false,
+        animation: { duration: 600 },
+        plugins: { legend: { labels: { color: "#94A3B8", font: { size: 11 } } } },
+        scales: { r: {
+          ticks: { color: "#475569", backdropColor: "transparent", font: { size: 9 } },
+          grid: { color: "rgba(255,255,255,.07)" },
+          pointLabels: { color: "#94A3B8", font: { size: 10 } }
+        }}
+      }
+    });
+  }
+
+  // Alert timeline visualization
+  renderTimeline(alerts);
+  document.getElementById("alerts-count-meta").textContent = "(" + alerts.length + " alerts)";
+
+  // Alert details table
+  document.getElementById("tbl-meta").textContent = alerts.length + " alerts for " + ip;
+  document.getElementById("ip-alerts-table").innerHTML = alerts.length
+    ? alerts.map(function(a) {
+        var sev = a.severity || "low";
+        var mitre = a.mitre_technique ? '<span class="mitre-tag" style="font-size:9px;padding:2px 6px;">' + a.mitre_technique + '</span>' : "—";
+        return '<tr>' +
+          '<td class="mono" style="font-size:11px;">' + ts(a.timestamp) + '</td>' +
+          '<td><span class="badge ' + sev + '">' + a.attack_type + '</span></td>' +
+          '<td><span style="font-weight:700;color:var(--purple2);">' + Math.round(a.confidence * 100) + '%</span></td>' +
+          '<td><span class="badge ' + sev + '">' + sev + '</span></td>' +
+          '<td>' + mitre + '</td>' +
+          '<td><span class="badge ' + (a.action_taken || "none") + '">' + a.action_taken + '</span></td>' +
+        '</tr>';
+      }).join("")
+    : '<tr><td colspan="6" class="tbl-empty">No alerts found for this IP</td></tr>';
+
+  // Evidence
+  renderEvidence(ip, data);
+
+  // Incident summary
+  buildSummary(ip, data);
+
+  // Web request log
+  var web = data.web_requests || [];
+  document.getElementById("web-count-meta").textContent = "(" + web.length + " requests)";
+  document.getElementById("web-log-table").innerHTML = web.length
+    ? web.map(function(w) {
+        var sc = w.status_code;
+        var scCol = sc >= 500 ? "#EF4444" : sc >= 400 ? "#F97316" : sc >= 300 ? "#EAB308" : "#22C55E";
+        return '<tr>' +
+          '<td class="mono" style="font-size:11px;">' + ts(w.timestamp) + '</td>' +
+          '<td><span style="font-weight:800;font-size:11px;color:#3B82F6;">' + w.method + '</span></td>' +
+          '<td class="mono" style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + w.path + '">' + w.path + '</td>' +
+          '<td><span style="font-weight:800;color:' + scCol + ';">' + sc + '</span></td>' +
+          '<td style="color:#475569;font-size:10.5px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + w.user_agent + '">' + w.user_agent + '</td>' +
+        '</tr>';
+      }).join("")
+    : '<tr><td colspan="5" class="tbl-empty">No web request logs for this IP</td></tr>';
+}
+
+/* ---- Incident summary ---- */
+function buildSummary(ip, data) {
+  var score  = data.risk_score || 0;
+  var alerts = data.alerts || [];
+  var types  = {};
+  alerts.forEach(function(a) { types[a.attack_type] = (types[a.attack_type] || 0) + 1; });
+  var typeLines = Object.keys(types).map(function(t) { return "  • " + t + ": " + types[t] + " alert" + (types[t] > 1 ? "s" : ""); }).join("\n");
+  var firstTs = alerts.length ? new Date(alerts[alerts.length - 1].timestamp).toLocaleString() : "N/A";
+  var lastTs  = alerts.length ? new Date(alerts[0].timestamp).toLocaleString() : "N/A";
+  var mitre   = (data.mitre_techniques || []).join(", ") || "None";
+  var blocked = alerts.some(function(a) { return a.action_taken === "blocked"; });
+
+  document.getElementById("summary-text").textContent = [
+    "INCIDENT SUMMARY — " + ip,
+    "═══════════════════════════════════════════════════════════",
+    "",
+    "Risk Score:         " + score + "/100  (" + riskLabel(score) + ")",
+    "Total Alerts:       " + data.alert_count,
+    "Web Requests:       " + data.web_request_count,
+    "First Seen:         " + firstTs,
+    "Last Activity:      " + lastTs,
+    "IP Blocked:         " + (blocked ? "YES — automatic block applied" : "No"),
+    "",
+    "Attack Types Detected:",
+    typeLines || "  None",
+    "",
+    "MITRE ATT&CK:       " + mitre,
+    "",
+    "Analyst Recommendation:",
+    "  " + (score >= 80
+      ? "IMMEDIATE action required — escalate to Tier 2 SOC analyst. Consider permanent block."
+      : score >= 50
+      ? "HIGH priority — this IP warrants investigation. Temporary block recommended pending review."
+      : score >= 25
+      ? "MEDIUM — monitor this IP for further suspicious activity. Alert Tier 1 SOC."
+      : "LOW risk — continue passive monitoring. No immediate action required."),
+    "",
+    "Report generated: " + new Date().toLocaleString() + " by " + (localStorage.getItem("idps_username") || "unknown"),
+  ].join("\n");
+}
+
+function copySummary() {
+  var text = document.getElementById("summary-text").textContent;
+  navigator.clipboard.writeText(text).then(function() {
+    alert("Summary copied to clipboard.");
+  });
+}
+
+/* ---- Block / Unblock ---- */
+async function blockIp() {
+  if (!currentIP) { alert("Investigate an IP first."); return; }
+  if (!confirm("Block IP " + currentIP + "?")) return;
+  var r = await apiFetch("/api/blocked-ips/" + encodeURIComponent(currentIP) + "/block", {
+    method: "POST", body: JSON.stringify({ reason: "manual forensics block — " + curUser })
+  });
+  if (!r) return;
+  var d = await r.json();
+  alert(d.message || d.error || "Done");
+}
+
+async function unblockIp() {
+  if (!currentIP) { alert("Investigate an IP first."); return; }
+  var r = await apiFetch("/api/blocked-ips/" + encodeURIComponent(currentIP) + "/unblock", { method: "POST" });
+  if (!r) return;
+  var d = await r.json();
+  alert(d.message || d.error || "Done");
+}
+
+async function downloadPDF() {
+  if (!currentIP) { alert("Investigate an IP first."); return; }
+  var r = await apiFetch("/api/forensics/" + encodeURIComponent(currentIP) + "/incident-report");
+  if (!r || !r.ok) { alert("PDF generation failed"); return; }
+  var blob = await r.blob();
+  var url  = URL.createObjectURL(blob);
+  var a    = document.createElement("a"); a.href = url; a.download = "incident_" + currentIP + ".pdf"; a.click();
+  URL.revokeObjectURL(url);
+}
+
+/* ---- Auto-load from URL param ---- */
+window.addEventListener("load", function() {
+  var p = new URLSearchParams(window.location.search);
+  var preip = p.get("ip");
+  if (preip) { document.getElementById("ip-input").value = preip; loadForensics(); }
+});
+</script>
+</body>
+</html>
